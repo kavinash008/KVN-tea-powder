@@ -1,0 +1,8 @@
+{
+  "name": "KVN TEAPOWDER",
+  "description": "Shop quality tea and coffee powders from KVN TEAPOWDER. Explore tea varieties, coffee powders, new collections and convenient local delivery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
