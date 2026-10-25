@@ -1,8 +1,10 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { Product, CartItem, BusinessConfig } from '../types';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { Product, CartItem, BusinessConfig, CustomerUser, CustomerAddress } from '../types';
 import { db } from '../lib/db';
+import { api } from '../lib/api';
 
 interface ShopContextType {
+  // Cart
   cart: CartItem[];
   addToCart: (product: Product, variantId?: string, quantity?: number) => void;
   updateCartQuantity: (variantId: string, quantity: number) => void;
@@ -11,16 +13,38 @@ interface ShopContextType {
   cartCount: number;
   cartSubtotal: number;
   
+  // Wishlist
   wishlist: string[];
   toggleWishlist: (productId: string) => void;
   isInWishlist: (productId: string) => boolean;
 
+  // Search
   searchQuery: string;
   setSearchQuery: (query: string) => void;
 
+  // Config
   config: BusinessConfig;
   refreshConfig: () => void;
 
+  // Customer Auth
+  currentUser: CustomerUser | null;
+  authToken: string | null;
+  savedAddresses: CustomerAddress[];
+  loginCustomer: (phone: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  registerCustomer: (data: {
+    fullName: string;
+    phone: string;
+    password: string;
+    email?: string;
+    initialAddress?: Partial<CustomerAddress>;
+  }) => Promise<{ success: boolean; error?: string }>;
+  logoutCustomer: () => void;
+  refreshUserProfile: () => Promise<void>;
+  addSavedAddress: (address: Omit<CustomerAddress, 'id'>) => Promise<CustomerAddress | null>;
+  updateSavedAddress: (id: string, updates: Partial<CustomerAddress>) => Promise<CustomerAddress | null>;
+  deleteSavedAddress: (id: string) => Promise<boolean>;
+
+  // Toast
   toastMessage: string | null;
   toast?: string | null;
   showToast: (msg: string) => void;
@@ -35,10 +59,34 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [config, setConfig] = useState<BusinessConfig>(() => db.getBusinessConfig());
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  // Customer Auth State
+  const [authToken, setAuthToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('kvn_customer_token');
+    } catch {
+      return null;
+    }
+  });
+
+  const [currentUser, setCurrentUser] = useState<CustomerUser | null>(() => {
+    try {
+      const stored = localStorage.getItem('kvn_customer_user');
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [savedAddresses, setSavedAddresses] = useState<CustomerAddress[]>(() => {
+    return currentUser?.addresses || [];
+  });
+
+  // Sync cart to local storage
   useEffect(() => {
     db.saveCart(cart);
   }, [cart]);
 
+  // Sync config updates
   useEffect(() => {
     const handleUpdate = () => {
       setConfig(db.getBusinessConfig());
@@ -51,11 +99,139 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, []);
 
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage((curr) => (curr === msg ? null : curr));
     }, 3000);
+  }, []);
+
+  // Fetch verified user profile on load if token exists
+  const refreshUserProfile = useCallback(async () => {
+    if (!authToken) return;
+    try {
+      const { user } = await api.getMe(authToken);
+      setCurrentUser(user);
+      setSavedAddresses(user.addresses || []);
+      try {
+        localStorage.setItem('kvn_customer_user', JSON.stringify(user));
+      } catch {
+        // ignore
+      }
+    } catch (err) {
+      console.warn('Session expired or invalid, logging out customer');
+      setAuthToken(null);
+      setCurrentUser(null);
+      setSavedAddresses([]);
+      try {
+        localStorage.removeItem('kvn_customer_token');
+        localStorage.removeItem('kvn_customer_user');
+      } catch {
+        // ignore
+      }
+    }
+  }, [authToken]);
+
+  useEffect(() => {
+    if (authToken) {
+      refreshUserProfile();
+    }
+  }, [authToken, refreshUserProfile]);
+
+  const loginCustomer = async (phone: string, password: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const { user, token } = await api.login(phone, password);
+      setAuthToken(token);
+      setCurrentUser(user);
+      setSavedAddresses(user.addresses || []);
+      try {
+        localStorage.setItem('kvn_customer_token', token);
+        localStorage.setItem('kvn_customer_user', JSON.stringify(user));
+      } catch {
+        // ignore
+      }
+      showToast(`Welcome back, ${user.fullName}!`);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Login failed' };
+    }
+  };
+
+  const registerCustomer = async (data: {
+    fullName: string;
+    phone: string;
+    password: string;
+    email?: string;
+    initialAddress?: Partial<CustomerAddress>;
+  }): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const { user, token } = await api.register(data);
+      setAuthToken(token);
+      setCurrentUser(user);
+      setSavedAddresses(user.addresses || []);
+      try {
+        localStorage.setItem('kvn_customer_token', token);
+        localStorage.setItem('kvn_customer_user', JSON.stringify(user));
+      } catch {
+        // ignore
+      }
+      showToast(`Account created! Welcome, ${user.fullName}`);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Registration failed' };
+    }
+  };
+
+  const logoutCustomer = () => {
+    setAuthToken(null);
+    setCurrentUser(null);
+    setSavedAddresses([]);
+    try {
+      localStorage.removeItem('kvn_customer_token');
+      localStorage.removeItem('kvn_customer_user');
+    } catch {
+      // ignore
+    }
+    showToast('Logged out of your customer account');
+  };
+
+  const addSavedAddress = async (address: Omit<CustomerAddress, 'id'>): Promise<CustomerAddress | null> => {
+    if (!authToken) return null;
+    try {
+      const newAddr = await api.addAddress(authToken, address);
+      await refreshUserProfile();
+      showToast('New address saved to your account');
+      return newAddr;
+    } catch (err: any) {
+      showToast(err.message || 'Failed to save address');
+      return null;
+    }
+  };
+
+  const updateSavedAddress = async (id: string, updates: Partial<CustomerAddress>): Promise<CustomerAddress | null> => {
+    if (!authToken) return null;
+    try {
+      const updated = await api.updateAddress(authToken, id, updates);
+      await refreshUserProfile();
+      showToast('Address updated');
+      return updated;
+    } catch (err: any) {
+      showToast(err.message || 'Failed to update address');
+      return null;
+    }
+  };
+
+  const deleteSavedAddress = async (id: string): Promise<boolean> => {
+    if (!authToken) return false;
+    try {
+      await api.deleteAddress(authToken, id);
+      await refreshUserProfile();
+      showToast('Address removed');
+      return true;
+    } catch (err: any) {
+      showToast(err.message || 'Failed to delete address');
+      return false;
+    }
   };
 
   const addToCart = (product: Product, variantId?: string, quantity: number = 1) => {
@@ -179,6 +355,16 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setSearchQuery,
         config,
         refreshConfig,
+        currentUser,
+        authToken,
+        savedAddresses,
+        loginCustomer,
+        registerCustomer,
+        logoutCustomer,
+        refreshUserProfile,
+        addSavedAddress,
+        updateSavedAddress,
+        deleteSavedAddress,
         toastMessage,
         toast: toastMessage,
         showToast,

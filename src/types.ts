@@ -90,6 +90,35 @@ export interface OrderStatusHistory {
   note?: string;
 }
 
+export interface CustomerAddress {
+  id: string;
+  label: 'Home' | 'Work' | 'Other';
+  recipientName: string;
+  phone: string;
+  addressLine: string;
+  landmark?: string;
+  villageTown: string;
+  district: string;
+  state: string;
+  pincode: string;
+  isDefault?: boolean;
+  coordinates?: {
+    latitude: number;
+    longitude: number;
+  };
+  createdAt?: string;
+}
+
+export interface CustomerUser {
+  id: string;
+  fullName: string;
+  phone: string;
+  email?: string;
+  addresses: CustomerAddress[];
+  createdAt: string;
+  updatedAt?: string;
+}
+
 export interface OrderCustomer {
   fullName: string;
   phone: string;
@@ -100,6 +129,10 @@ export interface OrderCustomer {
   state: string;
   pincode: string;
   deliveryInstructions?: string;
+  coordinates?: {
+    latitude: number;
+    longitude: number;
+  };
 }
 
 export interface Order {

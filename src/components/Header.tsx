@@ -36,7 +36,7 @@ export const Header: React.FC<HeaderProps> = ({
   onSearchChange,
 }) => {
   const currentTab = activePage || activeTab || 'home';
-  const { cartCount, wishlist, searchQuery: contextSearchQuery, setSearchQuery: setContextSearchQuery, config } = useShop();
+  const { cartCount, wishlist, searchQuery: contextSearchQuery, setSearchQuery: setContextSearchQuery, config, currentUser } = useShop();
 
   const searchQuery = propSearchQuery !== undefined ? propSearchQuery : contextSearchQuery;
   const updateSearchQuery = (val: string) => {
@@ -239,15 +239,20 @@ export const Header: React.FC<HeaderProps> = ({
                 )}
               </button>
 
-              {/* Customer Account Button (shown on screens sm and up) */}
+              {/* Customer Account Button */}
               <button
                 id="account-header-btn"
                 onClick={handleAccountClick}
-                className="hidden sm:inline-flex p-2 rounded-xl text-stone-700 hover:text-[#143728] hover:bg-stone-100 transition-colors"
+                className="p-1.5 sm:p-2 rounded-xl text-stone-700 hover:text-[#143728] hover:bg-stone-100 transition-colors flex items-center gap-1.5"
                 aria-label="Customer Account"
                 title="Customer Account & Orders"
               >
-                <User className="w-4 h-4 sm:w-5 sm:h-5" />
+                <User className="w-4 h-4 sm:w-5 sm:h-5 text-[#2e5e43]" />
+                {currentUser && (
+                  <span className="hidden md:inline text-xs font-bold text-[#143728]">
+                    {currentUser.fullName.split(' ')[0]}
+                  </span>
+                )}
               </button>
 
               {/* Mobile Menu Hamburger */}
@@ -341,6 +346,20 @@ export const Header: React.FC<HeaderProps> = ({
               />
             </form>
           </div>
+
+          {/* Account Button in Mobile Menu */}
+          <button
+            onClick={handleAccountClick}
+            className="w-full flex items-center justify-between p-3 rounded-xl bg-emerald-50 text-[#143728] font-bold text-xs border border-emerald-200/60"
+          >
+            <span className="flex items-center gap-2">
+              <User className="w-4 h-4 text-[#2e5e43]" />
+              {currentUser ? `Account: ${currentUser.fullName}` : 'Login / Register Account'}
+            </span>
+            <span className="text-[10px] bg-[#143728] text-white px-2 py-0.5 rounded-full">
+              {currentUser ? 'My Orders' : 'Sign In'}
+            </span>
+          </button>
 
           {/* Nav links grid */}
           <div className="grid grid-cols-2 gap-2">

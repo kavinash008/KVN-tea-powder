@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useContext, useEffect } from 'react';
 import { useShop, ShopContext, ShopProvider } from './context/ShopContext';
 import { db } from './lib/db';
+import { api } from './lib/api';
 import { Header } from './components/Header';
 import { Footer } from './components/Footer';
 import { ProductCard } from './components/ProductCard';
@@ -191,22 +192,34 @@ function AppContent() {
   };
 
   // Admin login handler
-  const handleAdminLogin = (e: React.FormEvent) => {
+  const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanPassword = adminPasswordInput.trim();
-    if (cleanPassword === 'kvn2026' || cleanPassword === '9787513911' || cleanPassword === '6383050287') {
+    setAdminAuthError('');
+
+    try {
+      // Authenticate with server API
+      const res = await api.adminLogin(cleanPassword);
+      if (res && res.token) {
+        localStorage.setItem('kvn_admin_token', res.token);
+      }
       setIsAdminLoggedIn(true);
-      setAdminAuthError('');
       if (rememberAdmin) {
-        try {
-          localStorage.setItem('kvn_admin_session', 'active');
-        } catch {
-          // ignore
-        }
+        localStorage.setItem('kvn_admin_session', 'active');
       }
       showToast('Welcome Krishnamoorthy! Admin access granted.');
-    } else {
-      setAdminAuthError('Invalid administrator passcode. Please try again.');
+      return;
+    } catch (err: any) {
+      // Fallback check if server endpoint failed or unreachable
+      if (cleanPassword === 'kvn2026' || cleanPassword === '9787513911' || cleanPassword === '6383050287') {
+        setIsAdminLoggedIn(true);
+        if (rememberAdmin) {
+          localStorage.setItem('kvn_admin_session', 'active');
+        }
+        showToast('Welcome Krishnamoorthy! Admin access granted.');
+        return;
+      }
+      setAdminAuthError(err.message || 'Invalid administrator passcode. Please try again.');
     }
   };
 
@@ -214,6 +227,7 @@ function AppContent() {
     setIsAdminLoggedIn(false);
     try {
       localStorage.removeItem('kvn_admin_session');
+      localStorage.removeItem('kvn_admin_token');
     } catch {
       // ignore
     }

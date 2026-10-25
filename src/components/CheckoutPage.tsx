@@ -1,17 +1,20 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useShop } from '../context/ShopContext';
 import { db } from '../lib/db';
-import { Order, OrderCustomer } from '../types';
+import { api } from '../lib/api';
+import { Order, OrderCustomer, CustomerAddress } from '../types';
 import { 
   ArrowLeft, 
-  CheckCircle2, 
   MapPin, 
   Truck, 
   ShieldCheck, 
-  CreditCard, 
   QrCode, 
   Clock, 
-  AlertCircle 
+  AlertCircle,
+  Navigation,
+  BookmarkCheck,
+  PlusCircle,
+  Loader2
 } from 'lucide-react';
 
 interface CheckoutPageProps {
@@ -20,12 +23,12 @@ interface CheckoutPageProps {
 }
 
 export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSuccess }) => {
-  const { cart, cartSubtotal, clearCart, config, showToast } = useShop();
+  const { cart, cartSubtotal, clearCart, config, showToast, currentUser, authToken, savedAddresses } = useShop();
 
   const [customer, setCustomer] = useState<OrderCustomer>({
-    fullName: '',
-    phone: '',
-    email: '',
+    fullName: currentUser?.fullName || '',
+    phone: currentUser?.phone || '',
+    email: currentUser?.email || '',
     address: '',
     villageTown: '',
     district: '',
@@ -34,9 +37,12 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
     deliveryInstructions: '',
   });
 
+  const [selectedSavedAddrId, setSelectedSavedAddrId] = useState<string>('custom');
   const [paymentMethod, setPaymentMethod] = useState<'COD' | 'ONLINE_UPI'>('COD');
   const [selectedAreaId, setSelectedAreaId] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
+  const [locating, setLocating] = useState(false);
+  const [locationSuccessMsg, setLocationSuccessMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
   // Delivery areas from database
@@ -52,6 +58,55 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
   }
 
   const finalTotal = cartSubtotal + deliveryCharge;
+
+  // Initialize form with customer default saved address if available
+  useEffect(() => {
+    if (savedAddresses && savedAddresses.length > 0) {
+      const defaultAddr = savedAddresses.find((a) => a.isDefault) || savedAddresses[0];
+      setSelectedSavedAddrId(defaultAddr.id);
+      applySavedAddress(defaultAddr);
+    } else if (currentUser) {
+      setCustomer((prev) => ({
+        ...prev,
+        fullName: prev.fullName || currentUser.fullName,
+        phone: prev.phone || currentUser.phone,
+        email: prev.email || currentUser.email || '',
+      }));
+    }
+  }, [savedAddresses, currentUser]);
+
+  const applySavedAddress = (addr: CustomerAddress) => {
+    setCustomer((prev) => ({
+      ...prev,
+      fullName: addr.recipientName || prev.fullName,
+      phone: addr.phone || prev.phone,
+      address: addr.addressLine,
+      villageTown: addr.villageTown,
+      district: addr.district || '',
+      state: addr.state || 'Tamil Nadu',
+      pincode: addr.pincode,
+      coordinates: addr.coordinates,
+    }));
+  };
+
+  const handleSavedAddressSelect = (addrId: string) => {
+    setSelectedSavedAddrId(addrId);
+    if (addrId === 'custom') {
+      // Clear address fields for manual entry
+      setCustomer((prev) => ({
+        ...prev,
+        address: '',
+        villageTown: '',
+        district: '',
+        pincode: '',
+      }));
+    } else {
+      const found = savedAddresses.find((a) => a.id === addrId);
+      if (found) {
+        applySavedAddress(found);
+      }
+    }
+  };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
@@ -72,58 +127,128 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
     }
   };
 
+  // Phase 5: Optional GPS Geolocation with reverse geocoding and zero background tracking
+  const handleUseCurrentLocation = () => {
+    if (!navigator.geolocation) {
+      setErrorMsg('Geolocation is not supported by your browser. Please enter your address manually.');
+      return;
+    }
+
+    setLocating(true);
+    setErrorMsg('');
+    setLocationSuccessMsg('');
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const lat = position.coords.latitude;
+        const lon = position.coords.longitude;
+
+        setCustomer((prev) => ({
+          ...prev,
+          coordinates: { latitude: lat, longitude: lon },
+        }));
+
+        try {
+          // Attempt reverse geocoding with OpenStreetMap Nominatim
+          const res = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&addressdetails=1`,
+            { headers: { 'Accept-Language': 'en' } }
+          );
+          if (res.ok) {
+            const data = await res.json();
+            const addr = data.address || {};
+            const streetParts = [addr.house_number, addr.road, addr.suburb, addr.neighbourhood].filter(Boolean);
+            const street = streetParts.join(', ') || addr.display_name?.split(',').slice(0, 2).join(',') || '';
+            const villageTown = addr.village || addr.town || addr.city || addr.suburb || addr.county || '';
+            const district = addr.state_district || addr.district || '';
+            const state = addr.state || 'Tamil Nadu';
+            const pincode = (addr.postcode || '').replace(/\D/g, '').slice(0, 6);
+
+            setCustomer((prev) => ({
+              ...prev,
+              address: street ? `${street}` : prev.address,
+              villageTown: villageTown || prev.villageTown,
+              district: district || prev.district,
+              state: state || prev.state,
+              pincode: pincode || prev.pincode,
+            }));
+            setLocationSuccessMsg('GPS Location detected! Please check and confirm your door number & street.');
+          } else {
+            setLocationSuccessMsg('GPS Coordinates saved. Please type your door number & street.');
+          }
+        } catch {
+          setLocationSuccessMsg('GPS Coordinates saved. Please type your street name.');
+        } finally {
+          setLocating(false);
+        }
+      },
+      (error) => {
+        setLocating(false);
+        if (error.code === error.PERMISSION_DENIED) {
+          setErrorMsg('Location permission denied. Please enter your address manually.');
+        } else {
+          setErrorMsg('Unable to determine location. Please enter your address manually.');
+        }
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 60000,
+      }
+    );
+  };
+
   const handleSubmitOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
 
-    // Form validation
-    if (!customer.fullName.trim()) {
-      setErrorMsg('Please enter your full name.');
+    // Strict client-side validation before sending
+    if (!customer.fullName.trim() || customer.fullName.trim().length < 2) {
+      setErrorMsg('Please enter your full name (at least 2 characters).');
       return;
     }
-    if (!customer.phone.trim() || customer.phone.replace(/\D/g, '').length < 10) {
-      setErrorMsg('Please enter a valid 10-digit mobile number.');
+    const cleanPhone = customer.phone.replace(/\D/g, '');
+    const normPhone = cleanPhone.length === 12 && cleanPhone.startsWith('91') ? cleanPhone.slice(2) : cleanPhone;
+    if (!/^[6-9]\d{9}$/.test(normPhone)) {
+      setErrorMsg('Please enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.');
       return;
     }
-    if (!customer.address.trim()) {
-      setErrorMsg('Please enter your house/street delivery address.');
+    if (!customer.address.trim() || customer.address.trim().length < 5) {
+      setErrorMsg('Please enter your house/street delivery address (at least 5 characters).');
       return;
     }
     if (!customer.villageTown.trim()) {
       setErrorMsg('Please specify your village or town.');
       return;
     }
-    if (!customer.pincode.trim()) {
-      setErrorMsg('Please specify your area pincode.');
+    if (!customer.pincode.trim() || !/^[1-9][0-9]{5}$/.test(customer.pincode.trim())) {
+      setErrorMsg('Please enter a valid 6-digit Indian PIN code (e.g. 638001).');
       return;
     }
 
     setSubmitting(true);
 
     try {
-      // NOTE: Strictly respecting user intent:
-      // "Do not fake successful payments. Payment status must only become 'Paid' after confirmation from payment provider/webhook."
-      // Online payments start with 'Pending' payment status until confirmed.
-      const initialPaymentStatus = paymentMethod === 'COD' ? 'Pending' : 'Pending';
-      const initialOrderStatus = paymentMethod === 'COD' ? 'Order Confirmed' : 'Payment Pending';
-
-      const createdOrder = await db.createOrder({
-        customer,
-        items: cart,
-        subtotal: cartSubtotal,
-        deliveryCharge,
-        discountAmount: 0,
-        totalAmount: finalTotal,
-        paymentMethod,
-        paymentStatus: initialPaymentStatus,
-        orderStatus: initialOrderStatus,
-      });
+      // Create order via shared backend API endpoint
+      const createdOrder = await api.createOrder(
+        {
+          customer: {
+            ...customer,
+            phone: normPhone,
+          },
+          items: cart,
+          paymentMethod: paymentMethod === 'COD' ? 'COD' : 'ONLINE_UPI',
+          notes: customer.deliveryInstructions,
+        },
+        authToken
+      );
 
       clearCart();
-      showToast('Order registered successfully!');
+      showToast('Order placed successfully! Saved to shared database.');
       onOrderSuccess(createdOrder);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to place order. Please try again or order via WhatsApp.');
+      console.error('Order submission error:', err);
+      setErrorMsg(err.message || 'Failed to place order. Please try again.');
     } finally {
       setSubmitting(false);
     }
@@ -135,7 +260,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
         <p className="text-stone-600 mb-4">No items in your cart to checkout.</p>
         <button
           onClick={onBack}
-          className="px-6 py-2.5 bg-[#143728] text-white rounded-xl text-sm font-semibold"
+          className="px-6 py-2.5 bg-[#143728] text-white rounded-xl text-sm font-semibold hover:bg-[#204e37] transition-all"
         >
           Return to Products
         </button>
@@ -157,17 +282,98 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
         {/* Left: Customer Info Form */}
         <div className="flex-1">
           <div className="bg-white rounded-3xl p-6 sm:p-8 border border-stone-200/80 shadow-xs">
-            <h2 className="text-xl font-bold text-stone-900 mb-1">
-              Delivery & Contact Details
-            </h2>
-            <p className="text-xs text-stone-500 mb-6">
-              Enter your address for direct local delivery by KVN TEAPOWDER.
-            </p>
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <h2 className="text-xl font-bold text-stone-900 mb-1">
+                  Delivery & Contact Details
+                </h2>
+                <p className="text-xs text-stone-500">
+                  Enter your address for direct local delivery by KVN TEAPOWDER.
+                </p>
+              </div>
+
+              {/* Optional GPS Location Button */}
+              <button
+                type="button"
+                onClick={handleUseCurrentLocation}
+                disabled={locating}
+                className="flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#143728] border border-[#2e5e43]/30 rounded-xl text-xs font-semibold transition-all shadow-2xs"
+                title="Detect delivery location using device GPS"
+              >
+                {locating ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Navigation className="w-3.5 h-3.5 text-[#2e5e43]" />
+                )}
+                <span>{locating ? 'Detecting GPS...' : '📍 Use My Location'}</span>
+              </button>
+            </div>
 
             {errorMsg && (
-              <div className="mb-6 p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-center gap-2">
+              <div className="mb-4 p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0" />
                 <span>{errorMsg}</span>
+              </div>
+            )}
+
+            {locationSuccessMsg && (
+              <div className="mb-4 p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center gap-2">
+                <BookmarkCheck className="w-4 h-4 shrink-0 text-emerald-600" />
+                <span>{locationSuccessMsg}</span>
+              </div>
+            )}
+
+            {/* Saved Addresses Selector (Phase 4) */}
+            {savedAddresses.length > 0 && (
+              <div className="mb-6 pb-4 border-b border-stone-100">
+                <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-2">
+                  Choose Delivery Address:
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {savedAddresses.map((addr) => (
+                    <button
+                      type="button"
+                      key={addr.id}
+                      onClick={() => handleSavedAddressSelect(addr.id)}
+                      className={`text-left p-3 rounded-2xl border text-xs transition-all ${
+                        selectedSavedAddrId === addr.id
+                          ? 'border-[#2e5e43] bg-emerald-50/60 text-[#143728] ring-1 ring-[#2e5e43]'
+                          : 'border-stone-200 hover:border-stone-300 bg-stone-50 text-stone-700'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between font-semibold text-stone-900 mb-0.5">
+                        <span className="flex items-center gap-1.5">
+                          <MapPin className="w-3.5 h-3.5 text-[#2e5e43]" />
+                          {addr.label}
+                        </span>
+                        {addr.isDefault && (
+                          <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.2 rounded font-medium">
+                            Default
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-stone-600 truncate">{addr.recipientName} ({addr.phone})</div>
+                      <div className="text-[11px] text-stone-500 truncate">{addr.addressLine}, {addr.villageTown} - {addr.pincode}</div>
+                    </button>
+                  ))}
+
+                  {/* Option to type new address */}
+                  <button
+                    type="button"
+                    onClick={() => handleSavedAddressSelect('custom')}
+                    className={`text-left p-3 rounded-2xl border text-xs transition-all flex items-center gap-2 ${
+                      selectedSavedAddrId === 'custom'
+                        ? 'border-[#2e5e43] bg-emerald-50/60 text-[#143728] ring-1 ring-[#2e5e43]'
+                        : 'border-dashed border-stone-300 hover:border-stone-400 bg-white text-stone-600'
+                    }`}
+                  >
+                    <PlusCircle className="w-4 h-4 text-stone-500" />
+                    <div>
+                      <div className="font-semibold text-stone-900">Enter a Different Address</div>
+                      <div className="text-[11px] text-stone-500">Provide new delivery location details</div>
+                    </div>
+                  </button>
+                </div>
               </div>
             )}
 
@@ -203,7 +409,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
                 <div>
                   <label className="block text-xs font-semibold text-stone-700 mb-1">
-                    Full Name *
+                    Recipient Full Name *
                   </label>
                   <input
                     type="text"
@@ -359,7 +565,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
                     </div>
                   </label>
 
-                  {/* Online UPI / Gateway Integration Structure */}
+                  {/* Online UPI */}
                   <label 
                     className={`flex items-start gap-3 p-4 rounded-2xl border cursor-pointer transition-all ${
                       paymentMethod === 'ONLINE_UPI'
@@ -386,12 +592,11 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
                   </label>
                 </div>
 
-                {/* Clear payment security disclaimer */}
                 {paymentMethod === 'ONLINE_UPI' && (
                   <div className="mt-3 p-3 bg-amber-50 rounded-xl border border-amber-200/80 text-[11px] text-amber-900 flex items-start gap-2">
                     <Clock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
                     <span>
-                      <strong>Strict Security Policy:</strong> Payment will remain in <em>Payment Pending</em> status until verified via payment webhook/bank confirmation by Krishnamoorthy.
+                      <strong>Strict Security Policy:</strong> Payment will remain in <em>Pending</em> status until verified by Krishnamoorthy upon receipt.
                     </span>
                   </div>
                 )}
@@ -404,7 +609,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
                   disabled={submitting}
                   className="w-full py-4 bg-[#143728] text-white font-bold text-sm rounded-xl hover:bg-[#204e37] active:scale-98 transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-50"
                 >
-                  {submitting ? 'Placing Your Order...' : `Confirm & Place Order (₹${finalTotal})`}
+                  {submitting ? 'Saving Order to Database...' : `Confirm & Place Order (₹${finalTotal})`}
                 </button>
               </div>
             </form>
