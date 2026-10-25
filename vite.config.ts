@@ -8,7 +8,7 @@ function expressApiPlugin(): Plugin {
     name: 'express-api-plugin',
     apply: 'serve',
     async configureServer(server) {
-      const { default: apiApp } = await import('./api/index.ts');
+      const { default: apiApp } = await import('./server/index.ts');
       server.middlewares.use(apiApp);
     },
   };
