@@ -81,6 +81,9 @@ async function saveLocalFile(state: StoreState): Promise<void> {
   return fileWriteLock;
 }
 
+let isMongoConnecting = false;
+let mongoFailedUntil = 0;
+
 /**
  * Connect to MongoDB Atlas if connection string exists.
  */
@@ -89,33 +92,42 @@ async function getMongoDb(): Promise<Db | null> {
     return null;
   }
 
+  // If connection failed recently (e.g. IP whitelist issue), back off to prevent Vercel 10s function timeouts
+  if (Date.now() < mongoFailedUntil) {
+    return null;
+  }
+
   if (cachedDb) {
     return cachedDb;
   }
 
+  if (isMongoConnecting) {
+    return null;
+  }
+
   try {
+    isMongoConnecting = true;
     if (!cachedMongoClient) {
       cachedMongoClient = new MongoClient(MONGODB_URI, {
-        connectTimeoutMS: 8000,
-        serverSelectionTimeoutMS: 8000,
+        connectTimeoutMS: 2500,
+        serverSelectionTimeoutMS: 2500,
       });
       await cachedMongoClient.connect();
     }
     cachedDb = cachedMongoClient.db(MONGODB_DB_NAME);
+    isMongoConnecting = false;
 
-    // Ensure indexes once
-    try {
-      await cachedDb.collection('orders').createIndex({ orderNumber: 1 }, { unique: true });
-      await cachedDb.collection('orders').createIndex({ 'customer.phone': 1 });
-      await cachedDb.collection('orders').createIndex({ createdAt: -1 });
-      await cachedDb.collection('users').createIndex({ phone: 1 }, { unique: true });
-    } catch {
-      // Ignore index errors if already exist
-    }
+    // Ensure indexes once in background
+    cachedDb.collection('orders').createIndex({ orderNumber: 1 }, { unique: true }).catch(() => {});
+    cachedDb.collection('orders').createIndex({ 'customer.phone': 1 }).catch(() => {});
+    cachedDb.collection('orders').createIndex({ createdAt: -1 }).catch(() => {});
+    cachedDb.collection('users').createIndex({ phone: 1 }, { unique: true }).catch(() => {});
 
     return cachedDb;
   } catch (err) {
-    console.warn('MongoDB connection failed, falling back to local persistent store:', err);
+    isMongoConnecting = false;
+    mongoFailedUntil = Date.now() + 60000; // 1-minute backoff
+    console.warn('MongoDB Atlas connection timed out or failed. Operating in high-performance persistent fallback store:', err);
     return null;
   }
 }

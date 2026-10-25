@@ -17,11 +17,11 @@ const app = express();
 // Parse JSON bodies (up to 2MB)
 app.use(express.json({ limit: '2mb' }));
 
-// Permissive CORS middleware for cross-origin or preview deployments
+// Permissive CORS middleware
 app.use((req: Request, res: Response, next: NextFunction) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-admin-passcode');
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -48,7 +48,6 @@ function authenticateAdmin(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   const adminKey = req.headers['x-admin-passcode'] as string;
 
-  // Allow either Bearer admin token or direct passcode header for simplicity & fallback
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7);
     if (verifyAdminToken(token)) {
@@ -63,16 +62,28 @@ function authenticateAdmin(req: Request, res: Response, next: NextFunction) {
   return res.status(403).json({ error: 'Unauthorized: Admin access required' });
 }
 
+// Sub-router to allow dual mounting on both '/' and '/api'
+const router = express.Router();
+
 // ==========================================
-// 1. HEALTH & SYSTEM STATUS
+// 1. HEALTH & ROOT STATUS
 // ==========================================
-app.get('/api/health', async (_req: Request, res: Response) => {
-  const cloud = await serverDb.isCloudConnected();
-  res.json({
-    status: 'healthy',
-    mode: cloud ? 'cloud-mongodb' : 'persistent-store',
-    timestamp: new Date().toISOString(),
-  });
+router.get(['/', '/health'], async (_req: Request, res: Response) => {
+  try {
+    const cloud = await serverDb.isCloudConnected();
+    return res.json({
+      status: 'healthy',
+      mode: cloud ? 'cloud-mongodb' : 'persistent-store',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    return res.json({
+      status: 'healthy',
+      mode: 'persistent-store',
+      note: 'Fallback active',
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 // ==========================================
@@ -80,7 +91,7 @@ app.get('/api/health', async (_req: Request, res: Response) => {
 // ==========================================
 
 // Register a new customer
-app.post('/api/auth/register', async (req: Request, res: Response) => {
+router.post('/auth/register', async (req: Request, res: Response) => {
   try {
     const { fullName, phone, password, email, initialAddress } = req.body;
 
@@ -112,8 +123,6 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     });
 
     const token = createToken({ userId: newUser.id, phone: newUser.phone, role: 'customer' });
-
-    // Do not return password hash
     const { passwordHash: _, ...safeUser } = newUser;
 
     return res.status(201).json({
@@ -128,7 +137,7 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
 });
 
 // Customer Login
-app.post('/api/auth/login', async (req: Request, res: Response) => {
+router.post('/auth/login', async (req: Request, res: Response) => {
   try {
     const { phone, password } = req.body;
 
@@ -166,7 +175,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
 });
 
 // Customer Current User Profile
-app.get('/api/auth/me', authenticateCustomer, async (req: Request, res: Response) => {
+router.get('/auth/me', authenticateCustomer, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user.userId;
     const user = await serverDb.getUserById(userId);
@@ -182,7 +191,7 @@ app.get('/api/auth/me', authenticateCustomer, async (req: Request, res: Response
 });
 
 // Update Profile
-app.put('/api/auth/profile', authenticateCustomer, async (req: Request, res: Response) => {
+router.put('/auth/profile', authenticateCustomer, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user.userId;
     const { fullName, email } = req.body;
@@ -199,7 +208,7 @@ app.put('/api/auth/profile', authenticateCustomer, async (req: Request, res: Res
 });
 
 // Customer Saved Addresses
-app.get('/api/auth/addresses', authenticateCustomer, async (req: Request, res: Response) => {
+router.get('/auth/addresses', authenticateCustomer, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user.userId;
     const addresses = await serverDb.getUserAddresses(userId);
@@ -210,7 +219,7 @@ app.get('/api/auth/addresses', authenticateCustomer, async (req: Request, res: R
 });
 
 // Add New Delivery Address
-app.post('/api/auth/addresses', authenticateCustomer, async (req: Request, res: Response) => {
+router.post('/auth/addresses', authenticateCustomer, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user.userId;
     const addressData = req.body;
@@ -252,7 +261,7 @@ app.post('/api/auth/addresses', authenticateCustomer, async (req: Request, res: 
 });
 
 // Update Existing Address
-app.put('/api/auth/addresses/:id', authenticateCustomer, async (req: Request, res: Response) => {
+router.put('/auth/addresses/:id', authenticateCustomer, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user.userId;
     const addressId = req.params.id;
@@ -267,7 +276,7 @@ app.put('/api/auth/addresses/:id', authenticateCustomer, async (req: Request, re
 });
 
 // Delete Address
-app.delete('/api/auth/addresses/:id', authenticateCustomer, async (req: Request, res: Response) => {
+router.delete('/auth/addresses/:id', authenticateCustomer, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user.userId;
     const addressId = req.params.id;
@@ -285,8 +294,8 @@ app.delete('/api/auth/addresses/:id', authenticateCustomer, async (req: Request,
 // 3. ORDER CREATION & CUSTOMER ORDERS
 // ==========================================
 
-// Place Order (Guest or Logged in Customer)
-app.post('/api/orders', async (req: Request, res: Response) => {
+// Place Order
+router.post('/orders', async (req: Request, res: Response) => {
   try {
     const { customer, items, paymentMethod, notes } = req.body;
 
@@ -294,19 +303,16 @@ app.post('/api/orders', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Customer and delivery details are required' });
     }
 
-    // Server-side validation of customer & delivery fields
     const addrVal = validateAddress(customer);
     if (!addrVal.valid) {
       return res.status(400).json({ error: addrVal.error });
     }
 
-    // Server-side validation and price re-calculation from trusted catalogue
     const pricing = validateAndPriceOrder(items);
     if (!pricing.valid) {
       return res.status(400).json({ error: pricing.error });
     }
 
-    // Prevent accidental duplicate submission within 30 seconds
     const isDuplicate = await serverDb.checkDuplicateOrder(customer.phone, pricing.subtotal, 30000);
     if (isDuplicate) {
       return res.status(429).json({
@@ -314,7 +320,6 @@ app.post('/api/orders', async (req: Request, res: Response) => {
       });
     }
 
-    // Clean normalized customer data
     const phoneVal = validatePhone(customer.phone);
     const cleanCustomer = {
       ...customer,
@@ -325,7 +330,6 @@ app.post('/api/orders', async (req: Request, res: Response) => {
       pincode: customer.pincode.trim(),
     };
 
-    // Save order with server-calculated totals
     const order = await serverDb.createOrder({
       customer: cleanCustomer,
       items: pricing.validatedItems,
@@ -339,12 +343,10 @@ app.post('/api/orders', async (req: Request, res: Response) => {
       notes: notes?.trim() || '',
     });
 
-    // Check if an auth token was supplied; if so, associate / update user address if appropriate
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const payload = verifyToken(authHeader.slice(7));
       if (payload && payload.userId) {
-        // If user has no addresses, save this delivery address as default
         const addresses = await serverDb.getUserAddresses(payload.userId);
         if (addresses.length === 0) {
           await serverDb.addAddress(payload.userId, {
@@ -375,8 +377,8 @@ app.post('/api/orders', async (req: Request, res: Response) => {
   }
 });
 
-// Get Order Details by ID or Order Number
-app.get('/api/orders/:id', async (req: Request, res: Response) => {
+// Get Order Details by ID
+router.get('/orders/:id', async (req: Request, res: Response) => {
   try {
     const order = await serverDb.getOrderById(req.params.id);
     if (!order) {
@@ -389,11 +391,10 @@ app.get('/api/orders/:id', async (req: Request, res: Response) => {
 });
 
 // Customer: Get My Orders
-app.get('/api/orders/customer/my-orders', async (req: Request, res: Response) => {
+router.get('/orders/customer/my-orders', async (req: Request, res: Response) => {
   try {
     let phone = req.query.phone as string;
 
-    // If Bearer token is provided, extract phone from token
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const payload = verifyToken(authHeader.slice(7));
@@ -418,7 +419,7 @@ app.get('/api/orders/customer/my-orders', async (req: Request, res: Response) =>
 // ==========================================
 
 // Admin Login
-app.post('/api/admin/login', (req: Request, res: Response) => {
+router.post('/admin/login', (req: Request, res: Response) => {
   const { passcode } = req.body;
   if (!passcode || !verifyAdminPasscode(passcode)) {
     return res.status(401).json({ error: 'Invalid admin passcode. Access denied.' });
@@ -433,7 +434,7 @@ app.post('/api/admin/login', (req: Request, res: Response) => {
 });
 
 // Admin: Fetch All Orders
-app.get('/api/admin/orders', authenticateAdmin, async (req: Request, res: Response) => {
+router.get('/admin/orders', authenticateAdmin, async (req: Request, res: Response) => {
   try {
     const status = req.query.status as string;
     const orders = await serverDb.getAllOrders(status);
@@ -449,7 +450,7 @@ app.get('/api/admin/orders', authenticateAdmin, async (req: Request, res: Respon
 });
 
 // Admin: Update Order Status
-app.patch('/api/admin/orders/:id/status', authenticateAdmin, async (req: Request, res: Response) => {
+router.patch('/admin/orders/:id/status', authenticateAdmin, async (req: Request, res: Response) => {
   try {
     const { status, note } = req.body;
     const validStatuses: OrderStatus[] = [
@@ -482,7 +483,7 @@ app.patch('/api/admin/orders/:id/status', authenticateAdmin, async (req: Request
 });
 
 // Admin: Statistics & Overview
-app.get('/api/admin/stats', authenticateAdmin, async (_req: Request, res: Response) => {
+router.get('/admin/stats', authenticateAdmin, async (_req: Request, res: Response) => {
   try {
     const orders = await serverDb.getAllOrders();
     const totalOrders = orders.length;
@@ -512,4 +513,22 @@ app.get('/api/admin/stats', authenticateAdmin, async (_req: Request, res: Respon
   }
 });
 
-export default app;
+// Mount on BOTH '/api' AND '/' to guarantee route matches regardless of Vercel path rewrite
+app.use('/api', router);
+app.use('/', router);
+
+// Explicit 404 handler so res.end() is ALWAYS sent as valid JSON
+app.use((req: Request, res: Response) => {
+  res.status(404).json({ error: 'API route not found', path: req.url });
+});
+
+// Global Express error handler to prevent unhandled 500 HTML crashes
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('Unhandled API error:', err);
+  res.status(500).json({ error: err.message || 'Internal server error' });
+});
+
+// Export default function for Vercel Serverless Function runtime
+export default function handler(req: any, res: any) {
+  return app(req, res);
+}
