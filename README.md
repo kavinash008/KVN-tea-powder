@@ -6,50 +6,53 @@
 
 ## 🌟 Overview
 
-**KVN TEAPOWDER** is a modern, high-performance, mobile-first e-commerce web application featuring both a customer storefront and a separate, private administration portal.
+**KVN TEAPOWDER** is a full-stack, mobile-first e-commerce web application featuring a customer storefront, customer account & delivery address management, and a private administration portal powered by a shared persistent database (**MongoDB Atlas** + Vercel Serverless Functions).
 
-* **Customer Store**: Browse authentic Nilgiri teas, strong filter coffee blends, and family combos with multiple weight variants (250g, 500g, 1kg), cart drawer, and direct WhatsApp order assistance.
-* **Private Admin Portal**: Restricted management dashboard for the owner to add products, adjust prices, manage inventory, view customer orders, and update business settings in real-time.
+* **Customer Storefront**: Browse authentic Nilgiri teas, strong filter coffee blends, and family combos with multiple weight variants (250g, 500g, 1kg), smart cart, saved delivery addresses, device GPS auto-fill, and instant order placement.
+* **Customer Account**: Secure customer registration and login with encrypted passwords, saved address book (Home, Work), and complete personal order history.
+* **Private Admin Portal**: Protected management dashboard for Krishnamoorthy to manage orders in real-time across all customer devices, update delivery lifecycles (`Order Confirmed` ➔ `Processing` ➔ `Dispatched` ➔ `Delivered`), add products, and manage live inventory.
 
 ---
 
 ## 🚀 Key Features
 
-### 1. 📱 Ultra-Responsive & Mobile-First
-* **Optimized Mobile Header**: Auto-adapts down to 320px screens with zero horizontal overflow or multi-line wrapping.
-* **Smart Dropdown Search**: Full-width slide-down search input that never squishes navigation icons.
-* **Touch-Friendly Navigation**: Convenient drawer menu with 1-tap thumb access to account, orders, categories, and direct phone/WhatsApp support.
+### 1. 🌐 Shared Cross-Device Persistent Database (MongoDB Atlas)
+* **Real-Time Cross-Device Sync**: Orders submitted by any customer from any phone, computer, or browser immediately save to the central database and appear in the Admin Portal.
+* **Vercel Serverless Architecture**: Dedicated Express `/api` backend handles `/api/orders`, `/api/auth/*`, and `/api/admin/*` seamlessly.
+* **Zero Downtime Fallback**: Automatic failover to local persistent storage ensures continuous availability.
 
-### 2. ⚡ Buttery-Smooth Scroll Transitions (60fps, Zero Lag)
-* **Hardware-Accelerated Reveal**: Powered by browser-native `IntersectionObserver` using GPU 3D transforms (`translate3d` and `opacity`).
-* **Zero Battery Drain**: Elements unobserve once visible to maintain 0% CPU consumption during scrolling.
-* **Dynamic Frosted Header**: Header smoothly morphs into a frosted glass backdrop (`backdrop-blur-md`) with a golden reading progress indicator at the top.
-* **Floating Back-to-Top**: Quick floating button that appears after scrolling past 300px for one-tap smooth glide back to the top.
+### 2. 🔐 Customer Registration & Authentication
+* **Cryptographic Security**: Passwords are securely hashed with random salts using Node.js native `scrypt`.
+* **Private Order History**: Customers can view their orders, delivery statuses, and track live packages while maintaining strict privacy isolation.
+* **Saved Address Management**: Save multiple delivery addresses (Home, Work, etc.), select pre-set defaults at checkout, and manage contacts.
 
-### 3. 🔒 Dedicated Private Admin Portal
-* **Hidden from Customers**: All public admin buttons, links, and product modification options are removed from customer-facing headers and footers.
+### 3. 📍 Optional GPS Location & Smart Address Fill
+* **One-Tap GPS Auto-Fill**: Customers can click *"📍 Use My Location"* to detect coordinates and reverse-geocode street name, village/town, district, and PIN code.
+* **Zero Background Tracking**: Location permission is requested only on-demand and coordinates are editable by the customer.
+
+### 4. 📱 Ultra-Responsive & Mobile-First Storefront
+* **Zero-Overflow Mobile Header**: Fits all screen sizes down to 320px with quick slide-down search.
+* **Hardware-Accelerated 60fps Animations**: Powered by browser-native `IntersectionObserver` with GPU 3D transforms.
+* **Weight Variants & Authoritative Pricing**: Supports 250g, 500g, and 1kg with server-side validation to prevent price tampering.
+
+### 5. 🔒 Dedicated Private Admin Portal
 * **Accessing the Portal**:
-  * **Direct URL**: Navigate to `/#admin` (e.g. `http://localhost:3000/#admin` or `https://yourdomain.com/#admin`).
+  * **Direct URL**: Navigate to `/#admin` (e.g. `https://kvnteapowder.vercel.app/#admin`).
   * **Keyboard Shortcut**: Press `Ctrl` + `Alt` + `A` (or `Cmd` + `Alt` + `A`).
-  * **Discreet Footer Touchpoint**: Click the subtle lock `🔒` icon next to the copyright text at the bottom of the page.
-* **Passcode Protected**: Secure login with default passcode `kvn2026` or registered phone number `9787513911`. Includes a *"Remember on this device"* option.
-* **Product Management**:
-  * **+ Add Product**: Easily add new tea, coffee, or combos with weight variants, MRP, selling price, stock, images, description, brewing steps, and badges (*New Arrival*, *Customer Favourite*).
-  * **Live Sync**: Changes made in the Admin Dashboard immediately update the live customer storefront in real time.
-* **Order & Inventory Tracking**:
-  * Manage customer orders, track statuses (`Pending` ➔ `Confirmed` ➔ `Dispatched` ➔ `Delivered`), add courier tracking IDs.
-  * Real-time stock alerts for low inventory (≤ 5 units).
+  * **Discreet Footer Lock**: Click the subtle lock `🔒` icon in the footer.
+* **Passcode Protected**: Secure admin authentication via `POST /api/admin/login` (passcode: `kvn2026` or registered phone `9787513911`).
+* **Live Order Stream**: 15-second automatic polling and manual sync button to review new customer orders instantly.
+* **Order Lifecycle Controls**: Update statuses (`Order Confirmed`, `Processing`, `Dispatched`, `Out for Delivery`, `Delivered`, `Cancelled`) with automatic status history logging.
 
 ---
 
 ## 🛠️ Tech Stack
 
-* **Framework**: [React 19](https://react.dev/) + [TypeScript](https://www.typescriptlang.org/)
-* **Bundler & Dev Server**: [Vite 6](https://vitejs.dev/)
-* **Styling**: [Tailwind CSS 4](https://tailwindcss.com/)
-* **Icons**: [Lucide React](https://lucide.dev/)
-* **Animations**: Lightweight hardware-accelerated CSS + native `IntersectionObserver`
-* **Persistence**: LocalStorage with real-time custom event broadcasting
+* **Frontend**: [React 19](https://react.dev/), [TypeScript](https://www.typescriptlang.org/), [Tailwind CSS 4](https://tailwindcss.com/), [Lucide React](https://lucide.dev/)
+* **Backend**: [Express 4](https://expressjs.com/), [Vercel Serverless Functions](https://vercel.com/docs/functions)
+* **Database**: [MongoDB Atlas](https://www.mongodb.com/atlas) with automatic persistent file fallback
+* **Security**: Native `crypto.scryptSync` password hashing & HMAC-SHA256 JWT session tokens
+* **Bundler & Dev Server**: [Vite 6](https://vitejs.dev/) with integrated dev server API middleware
 
 ---
 
@@ -57,7 +60,7 @@
 
 ### Prerequisites
 * [Node.js](https://nodejs.org/) (v18 or newer)
-* npm, pnpm, or bun
+* npm
 
 ### Installation
 ```bash
@@ -68,19 +71,29 @@ cd KVN-tea-powder
 # Install dependencies
 npm install
 
-# Start local development server
+# Start local development server (serves frontend & backend together on port 3000)
 npm run dev
 ```
 
 Visit the app in your browser:
 * **Customer Store**: `http://localhost:3000/`
-* **Admin Portal**: `http://localhost:3000/#admin` *(Passcode: `kvn2026` or `9787513911`)*
+* **Admin Portal**: `http://localhost:3000/#admin` *(Passcode: `kvn2026`)*
 
 ### Build for Production
 ```bash
 npm run build
 ```
-The output files will be in the `dist/` directory, ready to deploy to Vercel, Netlify, Firebase, or GitHub Pages.
+
+---
+
+## ⚙️ Environment Variables (Vercel)
+
+| Variable | Description |
+| :--- | :--- |
+| `MONGODB_URI` | MongoDB Atlas connection string (`mongodb+srv://...`) |
+| `MONGODB_DB_NAME` | Database name (e.g. `kvn_store`) |
+| `ADMIN_PASSWORD` | Passcode for Krishnamoorthy to log into the Admin Dashboard (`kvn2026`) |
+| `JWT_SECRET` | Secret key for signing customer and admin session tokens |
 
 ---
 
