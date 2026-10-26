@@ -1014,6 +1014,7 @@ router.post("/orders", async (req, res) => {
       villageTown: customer.villageTown.trim(),
       pincode: customer.pincode.trim()
     };
+    const isOnlinePayment = paymentMethod === "Online" || paymentMethod === "ONLINE_UPI";
     const order = await serverDb.createOrder({
       customer: cleanCustomer,
       items: pricing.validatedItems,
@@ -1021,8 +1022,8 @@ router.post("/orders", async (req, res) => {
       deliveryCharge: pricing.deliveryCharge,
       discountAmount: 0,
       totalAmount: pricing.totalAmount,
-      paymentMethod: paymentMethod === "Online" ? "Online" : "COD",
-      paymentStatus: paymentMethod === "Online" ? "Paid" : "Pending",
+      paymentMethod: isOnlinePayment ? "ONLINE_UPI" : "COD",
+      paymentStatus: isOnlinePayment ? "Paid" : "Pending",
       orderStatus: "Order Confirmed",
       notes: notes?.trim() || ""
     });
@@ -1069,20 +1070,13 @@ router.get("/orders/:id", async (req, res) => {
     return res.status(500).json({ error: "Failed to fetch order" });
   }
 });
-router.get("/orders/customer/my-orders", async (req, res) => {
+router.get("/orders/customer/my-orders", authenticateCustomer, async (req, res) => {
   try {
-    let phone = req.query.phone;
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      const payload = verifyToken(authHeader.slice(7));
-      if (payload && payload.phone) {
-        phone = payload.phone;
-      }
+    const user = req.user;
+    if (!user || !user.phone) {
+      return res.status(401).json({ error: "Authentication required" });
     }
-    if (!phone) {
-      return res.status(400).json({ error: "Mobile number or authentication required to fetch orders" });
-    }
-    const orders = await serverDb.getOrdersByPhone(phone);
+    const orders = await serverDb.getOrdersByPhone(user.phone);
     return res.json({ orders });
   } catch (err) {
     return res.status(500).json({ error: "Failed to fetch customer orders" });

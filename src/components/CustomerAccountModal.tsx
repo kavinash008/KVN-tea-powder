@@ -57,6 +57,9 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
   const [regPhone, setRegPhone] = useState('');
   const [regPassword, setRegPassword] = useState('');
   const [regEmail, setRegEmail] = useState('');
+  const [regAddressLine, setRegAddressLine] = useState('');
+  const [regVillageTown, setRegVillageTown] = useState('');
+  const [regPincode, setRegPincode] = useState('');
 
   // Logged-in tabs: 'orders' | 'addresses' | 'profile' | 'wishlist'
   const [activeTab, setActiveTab] = useState<'orders' | 'addresses' | 'profile' | 'wishlist'>('orders');
@@ -67,6 +70,7 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
 
   // Address form modal/drawer
   const [isAddingAddress, setIsAddingAddress] = useState(false);
+  const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
   const [addrLabel, setAddrLabel] = useState<'Home' | 'Work' | 'Other'>('Home');
   const [addrRecipient, setAddrRecipient] = useState('');
   const [addrPhone, setAddrPhone] = useState('');
@@ -123,11 +127,24 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
     e.preventDefault();
     setFormError('');
     setSubmitting(true);
+    const initialAddress = regAddressLine.trim() ? {
+      label: 'Home' as const,
+      recipientName: regName.trim(),
+      phone: regPhone.trim(),
+      addressLine: regAddressLine.trim(),
+      villageTown: regVillageTown.trim() || '',
+      district: '',
+      state: 'Tamil Nadu',
+      pincode: regPincode.trim() || '',
+      isDefault: true,
+    } : undefined;
+
     const res = await registerCustomer({
       fullName: regName,
       phone: regPhone,
       password: regPassword,
       email: regEmail,
+      initialAddress,
     });
     setSubmitting(false);
     if (!res.success) {
@@ -188,6 +205,18 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
     );
   };
 
+  const handleStartEditAddress = (addr: CustomerAddress) => {
+    setEditingAddressId(addr.id);
+    setAddrLabel(addr.label);
+    setAddrRecipient(addr.recipientName);
+    setAddrPhone(addr.phone);
+    setAddrLine(addr.addressLine);
+    setAddrTown(addr.villageTown);
+    setAddrDistrict(addr.district || '');
+    setAddrPin(addr.pincode);
+    setIsAddingAddress(true);
+  };
+
   const handleSaveNewAddress = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!addrRecipient.trim() || !addrPhone.trim() || !addrLine.trim() || !addrTown.trim() || !addrPin.trim()) {
@@ -199,24 +228,45 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
       return;
     }
 
-    const saved = await addSavedAddress({
-      label: addrLabel,
-      recipientName: addrRecipient.trim(),
-      phone: addrPhone.trim(),
-      addressLine: addrLine.trim(),
-      villageTown: addrTown.trim(),
-      district: addrDistrict.trim(),
-      state: 'Tamil Nadu',
-      pincode: addrPin.trim(),
-      isDefault: savedAddresses.length === 0,
-    });
+    if (editingAddressId) {
+      const updated = await updateSavedAddress(editingAddressId, {
+        label: addrLabel,
+        recipientName: addrRecipient.trim(),
+        phone: addrPhone.trim(),
+        addressLine: addrLine.trim(),
+        villageTown: addrTown.trim(),
+        district: addrDistrict.trim(),
+        state: 'Tamil Nadu',
+        pincode: addrPin.trim(),
+      });
+      if (updated) {
+        setIsAddingAddress(false);
+        setEditingAddressId(null);
+        setAddrLine('');
+        setAddrTown('');
+        setAddrDistrict('');
+        setAddrPin('');
+      }
+    } else {
+      const saved = await addSavedAddress({
+        label: addrLabel,
+        recipientName: addrRecipient.trim(),
+        phone: addrPhone.trim(),
+        addressLine: addrLine.trim(),
+        villageTown: addrTown.trim(),
+        district: addrDistrict.trim(),
+        state: 'Tamil Nadu',
+        pincode: addrPin.trim(),
+        isDefault: savedAddresses.length === 0,
+      });
 
-    if (saved) {
-      setIsAddingAddress(false);
-      setAddrLine('');
-      setAddrTown('');
-      setAddrDistrict('');
-      setAddrPin('');
+      if (saved) {
+        setIsAddingAddress(false);
+        setAddrLine('');
+        setAddrTown('');
+        setAddrDistrict('');
+        setAddrPin('');
+      }
     }
   };
 
@@ -382,6 +432,46 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
                     className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
                   />
                 </div>
+
+                <div className="pt-2 border-t border-stone-100">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-semibold text-stone-700">Delivery Address (Optional)</span>
+                    <button
+                      type="button"
+                      onClick={handleGpsInAddressForm}
+                      disabled={locating}
+                      className="text-[11px] text-[#143728] font-semibold hover:underline flex items-center gap-1"
+                    >
+                      <Navigation className="w-3 h-3 text-[#2e5e43]" />
+                      {locating ? 'GPS...' : 'Use GPS'}
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    value={regAddressLine}
+                    onChange={(e) => setRegAddressLine(e.target.value)}
+                    placeholder="Door No, Street Name"
+                    className="w-full px-3.5 py-2 bg-stone-50 border border-stone-200 rounded-xl text-xs mb-2 focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      value={regVillageTown}
+                      onChange={(e) => setRegVillageTown(e.target.value)}
+                      placeholder="Village / Town"
+                      className="w-full px-3 py-2 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                    />
+                    <input
+                      type="text"
+                      maxLength={6}
+                      value={regPincode}
+                      onChange={(e) => setRegPincode(e.target.value)}
+                      placeholder="PIN (e.g. 638109)"
+                      className="w-full px-3 py-2 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                    />
+                  </div>
+                </div>
+
                 <button
                   type="submit"
                   disabled={submitting}
@@ -550,6 +640,13 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
                                 </button>
                               )}
                               <button
+                                onClick={() => handleStartEditAddress(addr)}
+                                className="text-stone-400 hover:text-[#2e5e43] p-0.5"
+                                title="Edit address"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
                                 onClick={() => deleteSavedAddress(addr.id)}
                                 className="text-stone-400 hover:text-rose-600 p-0.5"
                                 title="Delete address"
@@ -569,10 +666,12 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
                     )}
                   </>
                 ) : (
-                  /* Form to add address */
+                  /* Form to add or edit address */
                   <form onSubmit={handleSaveNewAddress} className="space-y-3 bg-stone-50 p-4 rounded-2xl border border-stone-200 text-xs">
                     <div className="flex items-center justify-between pb-2 border-b border-stone-200">
-                      <span className="font-bold text-stone-900">New Delivery Address</span>
+                      <span className="font-bold text-stone-900">
+                        {editingAddressId ? 'Edit Delivery Address' : 'New Delivery Address'}
+                      </span>
                       <button
                         type="button"
                         onClick={handleGpsInAddressForm}
@@ -678,11 +777,14 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
                         type="submit"
                         className="flex-1 py-2 bg-[#143728] text-white font-bold rounded-lg hover:bg-[#204e37] transition-all"
                       >
-                        Save Address
+                        {editingAddressId ? 'Save Changes' : 'Save Address'}
                       </button>
                       <button
                         type="button"
-                        onClick={() => setIsAddingAddress(false)}
+                        onClick={() => {
+                          setIsAddingAddress(false);
+                          setEditingAddressId(null);
+                        }}
                         className="px-3 py-2 bg-stone-200 text-stone-700 rounded-lg font-semibold hover:bg-stone-300"
                       >
                         Cancel
