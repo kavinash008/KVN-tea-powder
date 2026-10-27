@@ -46,6 +46,7 @@ import {
   RefreshCw,
   Eye,
   Loader2,
+  AlertCircle,
 } from 'lucide-react';
 
 interface AdminDashboardProps {
@@ -101,31 +102,71 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
   // Shared database synchronization state
   const [orderStatusFilter, setOrderStatusFilter] = useState<string>('all');
   const [isSyncingOrders, setIsSyncingOrders] = useState<boolean>(false);
+  const [ordersSyncError, setOrdersSyncError] = useState<string | null>(null);
   const [lastOrdersSync, setLastOrdersSync] = useState<string>('Live');
+
+  // n8n Webhook backup monitoring state
+  const [webhookStats, setWebhookStats] = useState<{
+    configured: boolean;
+    webhookUrl: string;
+    stats?: { total: number; delivered: number; pending: number; failed: number };
+  } | null>(null);
+  const [retryingWebhooks, setRetryingWebhooks] = useState(false);
+
+  const loadWebhookStatus = useCallback(async () => {
+    try {
+      const data = await api.adminGetWebhookStatus();
+      if (data && typeof data === 'object') {
+        setWebhookStats(data);
+      }
+    } catch (err) {
+      // Non-fatal if serverless or network glitch
+      console.warn('Webhook status check notice:', err);
+    }
+  }, []);
+
+  const handleRetryWebhooks = async () => {
+    try {
+      setRetryingWebhooks(true);
+      const res = await api.adminRetryWebhooks();
+      showAdminToast(res?.message || 'Webhook outbox flushed');
+      await loadWebhookStatus();
+    } catch (err: any) {
+      showAdminToast(err.message || 'Failed to retry webhooks');
+    } finally {
+      setRetryingWebhooks(false);
+    }
+  };
 
   const loadServerOrders = useCallback(async () => {
     try {
       setIsSyncingOrders(true);
+      setOrdersSyncError(null);
       const token = localStorage.getItem('kvn_admin_token') || 'kvn2026';
       const serverOrders = await api.adminGetOrders(token, orderStatusFilter);
       if (Array.isArray(serverOrders)) {
         setOrders(serverOrders);
         setLastOrdersSync(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       }
-    } catch (err) {
-      console.warn('Orders sync notice:', err);
-      setOrders(db.getOrders());
+    } catch (err: any) {
+      console.error('Orders sync notice:', err);
+      setOrdersSyncError(err?.message || 'Unable to reach shared database. Check network or server status.');
+      // Keep existing memory orders; do not silently replace with stale local browser storage
     } finally {
       setIsSyncingOrders(false);
     }
   }, [orderStatusFilter]);
 
-  // Real-time polling every 15 seconds to fetch orders placed on other devices
+  // Real-time polling every 12 seconds to fetch orders placed on other devices
   useEffect(() => {
     loadServerOrders();
-    const interval = setInterval(loadServerOrders, 15000);
+    loadWebhookStatus();
+    const interval = setInterval(() => {
+      loadServerOrders();
+      loadWebhookStatus();
+    }, 12000);
     return () => clearInterval(interval);
-  }, [loadServerOrders]);
+  }, [loadServerOrders, loadWebhookStatus]);
 
   const handleUpdateOrderStatus = async (orderId: string, newStatus: any) => {
     try {
@@ -135,12 +176,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
       if (orderDetailModal && orderDetailModal.id === orderId) {
         setOrderDetailModal(updated);
       }
-      db.updateOrderStatus(orderId, newStatus);
-      showAdminToast(`Order status updated to ${newStatus} (Saved in shared DB)`);
+      showAdminToast(`Order status updated to ${newStatus} (Saved to shared DB & dispatched)`);
+      loadWebhookStatus();
     } catch (err: any) {
-      db.updateOrderStatus(orderId, newStatus);
-      setOrders(db.getOrders());
-      showAdminToast(`Status changed to ${newStatus}`);
+      console.error('Update status error:', err);
+      showAdminToast(err?.message || `Failed to update status on shared database`);
     }
   };
 
@@ -611,21 +651,60 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                   <h2 className="text-xl font-bold text-stone-900">Orders Management</h2>
                   <p className="text-xs text-stone-500">Live order stream connected to shared persistent database.</p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {/* n8n Webhook backup indicator */}
+                  <div
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-stone-50 border border-stone-200 rounded-xl text-xs font-semibold text-stone-700 shadow-2xs"
+                    title={webhookStats?.configured ? 'n8n Webhook active & receiving order events' : 'Set N8N_WEBHOOK_URL in server environment variables'}
+                  >
+                    <span className={`w-2 h-2 rounded-full ${webhookStats?.configured ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+                    <span>n8n: {webhookStats?.configured ? 'Connected' : 'Not Set'}</span>
+                    {webhookStats?.stats && webhookStats.stats.total > 0 && (
+                      <span className="text-[10px] text-stone-500">({webhookStats.stats.delivered} sent)</span>
+                    )}
+                  </div>
+
+                  {webhookStats?.stats && (webhookStats.stats.pending > 0 || webhookStats.stats.failed > 0) && (
+                    <button
+                      onClick={handleRetryWebhooks}
+                      disabled={retryingWebhooks}
+                      className="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-xl text-xs font-semibold transition-all cursor-pointer shadow-2xs"
+                      title="Flush pending or failed webhook events"
+                    >
+                      {retryingWebhooks ? 'Flushing...' : `Retry Webhooks (${webhookStats.stats.pending + webhookStats.stats.failed})`}
+                    </button>
+                  )}
+
                   <button
                     onClick={() => loadServerOrders()}
                     disabled={isSyncingOrders}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-stone-100 hover:bg-stone-200 border border-stone-300 rounded-xl text-xs font-semibold text-stone-700 transition-all shadow-2xs"
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-stone-100 hover:bg-stone-200 border border-stone-300 rounded-xl text-xs font-semibold text-stone-700 transition-all shadow-2xs cursor-pointer"
                     title="Fetch latest orders from server"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 text-[#2e5e43] ${isSyncingOrders ? 'animate-spin' : ''}`} />
                     <span>{isSyncingOrders ? 'Syncing...' : `Sync (${lastOrdersSync})`}</span>
                   </button>
-                  <span className="text-xs font-semibold text-stone-600 bg-stone-100 px-3 py-1.5 rounded-xl border border-stone-200">
+                  <span className="text-xs font-semibold text-stone-600 bg-stone-100 px-3 py-1.5 rounded-xl border border-stone-200 shadow-2xs">
                     Total: {orders.length}
                   </span>
                 </div>
               </div>
+
+              {/* Error notice if shared DB unreachable */}
+              {ordersSyncError && (
+                <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                    <span>{ordersSyncError}</span>
+                  </div>
+                  <button
+                    onClick={() => loadServerOrders()}
+                    className="px-3 py-1 bg-rose-600 text-white font-semibold rounded-lg hover:bg-rose-700 transition-colors text-xs cursor-pointer"
+                  >
+                    Retry Sync
+                  </button>
+                </div>
+              )}
 
               {/* Status Filter Tabs (Phase 7) */}
               <div className="flex gap-1.5 overflow-x-auto pb-1 text-xs">
@@ -1286,17 +1365,59 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                   <span className="text-[10px] text-stone-400">All customer notifications reach this address.</span>
                 </div>
 
-                {/* n8n Webhook (Item 26) */}
-                <div className="pt-3 border-t border-stone-200">
-                  <label className="block font-semibold text-stone-700 mb-1">n8n Automation Webhook URL</label>
-                  <input
-                    type="url"
-                    value={config.n8nWebhookUrl || ''}
-                    onChange={(e) => setConfig({ ...config, n8nWebhookUrl: e.target.value })}
-                    placeholder="https://n8n.your-domain.com/webhook/..."
-                    className="w-full px-3 py-2 bg-stone-50 border border-stone-200 rounded-xl"
-                  />
-                  <span className="text-[10px] text-stone-400">Optional: Notifies n8n workflows for WhatsApp/Email bots on order events.</span>
+                {/* n8n Production Webhook & Backup Outbox */}
+                <div className="pt-3 border-t border-stone-200 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="font-bold text-xs text-stone-900">n8n Automated Production Backup</h4>
+                      <p className="text-[11px] text-stone-500">
+                        Dispatches durable, idempotent order events (`order.created`, `order.status_changed`) to your n8n workflow.
+                      </p>
+                    </div>
+                    <span className={`text-[10px] px-2.5 py-1 rounded-full font-bold ${
+                      webhookStats?.configured ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' : 'bg-amber-100 text-amber-800 border border-amber-300'
+                    }`}>
+                      {webhookStats?.configured ? '✓ Server Webhook Active' : '⚠ N8N_WEBHOOK_URL Not Set'}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2 text-xs">
+                    <div className="flex justify-between items-center text-[11px]">
+                      <span className="text-stone-600 font-medium">Server Environment:</span>
+                      <span className="font-mono text-stone-800">{webhookStats?.webhookUrl || 'Checking...'}</span>
+                    </div>
+
+                    {webhookStats?.stats && (
+                      <div className="grid grid-cols-3 gap-2 pt-1 border-t border-stone-200 text-center text-[11px]">
+                        <div className="bg-white p-2 rounded-lg border border-stone-200">
+                          <div className="font-bold text-emerald-700">{webhookStats.stats.delivered}</div>
+                          <div className="text-[10px] text-stone-400">Delivered</div>
+                        </div>
+                        <div className="bg-white p-2 rounded-lg border border-stone-200">
+                          <div className="font-bold text-amber-700">{webhookStats.stats.pending}</div>
+                          <div className="text-[10px] text-stone-400">Pending Retry</div>
+                        </div>
+                        <div className="bg-white p-2 rounded-lg border border-stone-200">
+                          <div className="font-bold text-stone-700">{webhookStats.stats.total}</div>
+                          <div className="text-[10px] text-stone-400">Total Events</div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="pt-1 flex items-center justify-between">
+                      <span className="text-[10px] text-stone-400">
+                        Set <code>N8N_WEBHOOK_URL</code> in Vercel to activate automated backup.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleRetryWebhooks}
+                        disabled={retryingWebhooks}
+                        className="px-3 py-1 bg-[#143728] text-white rounded-lg text-xs font-semibold hover:bg-[#204e37] transition-all cursor-pointer"
+                      >
+                        {retryingWebhooks ? 'Flushing...' : 'Flush Outbox'}
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Official Certification / Licences (Item 30) */}

@@ -212,6 +212,7 @@ function AppContent() {
     } catch (err: any) {
       // Fallback check if server endpoint failed or unreachable
       if (cleanPassword === 'kvn2026' || cleanPassword === '9787513911' || cleanPassword === '6383050287') {
+        localStorage.setItem('kvn_admin_token', cleanPassword);
         setIsAdminLoggedIn(true);
         if (rememberAdmin) {
           localStorage.setItem('kvn_admin_session', 'active');

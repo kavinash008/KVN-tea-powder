@@ -181,6 +181,8 @@ var INITIAL_PRODUCTS = [
 // server/_lib/db.ts
 var cachedMongoClient = null;
 var cachedDb = null;
+var mongoConnectPromise = null;
+var mongoFailedUntil = 0;
 var MONGODB_URI = process.env.MONGODB_URI || process.env.DATABASE_URL || "";
 var MONGODB_DB_NAME = process.env.MONGODB_DB_NAME || "kvn_store";
 var LOCAL_DATA_DIR = path.join(process.cwd(), ".data");
@@ -206,6 +208,7 @@ function ensureLocalFile() {
       orders: [],
       users: [],
       products: INITIAL_PRODUCTS,
+      webhookEvents: [],
       lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
     };
     try {
@@ -216,12 +219,15 @@ function ensureLocalFile() {
   }
   try {
     const content = fs.readFileSync(filePath, "utf-8");
-    return JSON.parse(content);
+    const parsed = JSON.parse(content);
+    parsed.webhookEvents = parsed.webhookEvents || [];
+    return parsed;
   } catch {
     return {
       orders: [],
       users: [],
       products: INITIAL_PRODUCTS,
+      webhookEvents: [],
       lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
     };
   }
@@ -242,47 +248,53 @@ async function saveLocalFile(state) {
   });
   return fileWriteLock;
 }
-var isMongoConnecting = false;
-var mongoFailedUntil = 0;
 async function getMongoDb() {
   if (!MONGODB_URI) {
-    return null;
-  }
-  if (Date.now() < mongoFailedUntil) {
     return null;
   }
   if (cachedDb) {
     return cachedDb;
   }
-  if (isMongoConnecting) {
+  if (Date.now() < mongoFailedUntil) {
     return null;
   }
-  try {
-    isMongoConnecting = true;
-    if (!cachedMongoClient) {
-      cachedMongoClient = new MongoClient(MONGODB_URI, {
-        connectTimeoutMS: 2500,
-        serverSelectionTimeoutMS: 2500
+  if (mongoConnectPromise) {
+    return await mongoConnectPromise;
+  }
+  mongoConnectPromise = (async () => {
+    try {
+      if (!cachedMongoClient) {
+        cachedMongoClient = new MongoClient(MONGODB_URI, {
+          connectTimeoutMS: 5e3,
+          serverSelectionTimeoutMS: 5e3
+        });
+        await cachedMongoClient.connect();
+      }
+      cachedDb = cachedMongoClient.db(MONGODB_DB_NAME);
+      cachedDb.collection("orders").createIndex({ orderNumber: 1 }, { unique: true }).catch(() => {
       });
-      await cachedMongoClient.connect();
+      cachedDb.collection("orders").createIndex({ "customer.phone": 1 }).catch(() => {
+      });
+      cachedDb.collection("orders").createIndex({ createdAt: -1 }).catch(() => {
+      });
+      cachedDb.collection("users").createIndex({ phone: 1 }, { unique: true }).catch(() => {
+      });
+      cachedDb.collection("webhook_outbox").createIndex({ eventId: 1 }, { unique: true }).catch(() => {
+      });
+      cachedDb.collection("webhook_outbox").createIndex({ status: 1 }).catch(() => {
+      });
+      return cachedDb;
+    } catch (err) {
+      console.warn("MongoDB Atlas connection failed:", err);
+      mongoFailedUntil = Date.now() + 3e3;
+      cachedMongoClient = null;
+      cachedDb = null;
+      return null;
+    } finally {
+      mongoConnectPromise = null;
     }
-    cachedDb = cachedMongoClient.db(MONGODB_DB_NAME);
-    isMongoConnecting = false;
-    cachedDb.collection("orders").createIndex({ orderNumber: 1 }, { unique: true }).catch(() => {
-    });
-    cachedDb.collection("orders").createIndex({ "customer.phone": 1 }).catch(() => {
-    });
-    cachedDb.collection("orders").createIndex({ createdAt: -1 }).catch(() => {
-    });
-    cachedDb.collection("users").createIndex({ phone: 1 }, { unique: true }).catch(() => {
-    });
-    return cachedDb;
-  } catch (err) {
-    isMongoConnecting = false;
-    mongoFailedUntil = Date.now() + 6e4;
-    console.warn("MongoDB Atlas connection timed out or failed. Operating in high-performance persistent fallback store:", err);
-    return null;
-  }
+  })();
+  return await mongoConnectPromise;
 }
 var serverDb = {
   async isCloudConnected() {
@@ -374,7 +386,11 @@ var serverDb = {
       createdAt: now,
       updatedAt: now
     };
-    const db = await getMongoDb();
+    let db = await getMongoDb();
+    if (!db && MONGODB_URI) {
+      mongoFailedUntil = 0;
+      db = await getMongoDb();
+    }
     if (db) {
       await db.collection("orders").insertOne(newOrder);
       return newOrder;
@@ -386,12 +402,21 @@ var serverDb = {
   },
   async updateOrderStatus(orderId, status, note) {
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const db = await getMongoDb();
+    let db = await getMongoDb();
+    if (!db && MONGODB_URI) {
+      mongoFailedUntil = 0;
+      db = await getMongoDb();
+    }
     if (db) {
       const existing = await db.collection("orders").findOne({
         $or: [{ id: orderId }, { orderNumber: orderId }]
       });
       if (!existing) return null;
+      const previousStatus2 = existing.orderStatus;
+      if (previousStatus2 === status) {
+        const { _id: _id2, ...rest2 } = existing;
+        return { order: rest2, previousStatus: previousStatus2, changed: false };
+      }
       const newHistoryItem = {
         status,
         timestamp: now,
@@ -410,12 +435,16 @@ var serverDb = {
       );
       const updated = await db.collection("orders").findOne({ _id: existing._id });
       const { _id, ...rest } = updated;
-      return rest;
+      return { order: rest, previousStatus: previousStatus2, changed: true };
     }
     const state = ensureLocalFile();
     const index = state.orders.findIndex((o) => o.id === orderId || o.orderNumber === orderId);
     if (index === -1) return null;
     const order = state.orders[index];
+    const previousStatus = order.orderStatus;
+    if (previousStatus === status) {
+      return { order, previousStatus, changed: false };
+    }
     order.orderStatus = status;
     order.updatedAt = now;
     if (status === "Delivered" && order.paymentMethod === "COD") {
@@ -427,7 +456,7 @@ var serverDb = {
       note: note || `Status updated to ${status} by Administrator`
     });
     await saveLocalFile(state);
-    return order;
+    return { order, previousStatus, changed: true };
   },
   // ===================== CUSTOMERS / USERS =====================
   async getUserByPhone(phone) {
@@ -487,7 +516,11 @@ var serverDb = {
       createdAt: now,
       updatedAt: now
     };
-    const db = await getMongoDb();
+    let db = await getMongoDb();
+    if (!db && MONGODB_URI) {
+      mongoFailedUntil = 0;
+      db = await getMongoDb();
+    }
     if (db) {
       await db.collection("users").insertOne(newUser);
       return newUser;
@@ -616,6 +649,64 @@ var serverDb = {
     }
     await saveLocalFile(state);
     return true;
+  },
+  // ===================== WEBHOOK OUTBOX =====================
+  async saveOutboxRecord(record) {
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection("webhook_outbox").insertOne(record);
+      return;
+    }
+    const state = ensureLocalFile();
+    state.webhookEvents = state.webhookEvents || [];
+    state.webhookEvents.push(record);
+    await saveLocalFile(state);
+  },
+  async updateOutboxRecord(id, updates) {
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection("webhook_outbox").updateOne({ id }, { $set: updates });
+      return;
+    }
+    const state = ensureLocalFile();
+    if (!state.webhookEvents) return;
+    const idx = state.webhookEvents.findIndex((r) => r.id === id);
+    if (idx >= 0) {
+      state.webhookEvents[idx] = { ...state.webhookEvents[idx], ...updates };
+      await saveLocalFile(state);
+    }
+  },
+  async getPendingOutboxRecords(limit = 25) {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection("webhook_outbox").find({ status: { $in: ["pending", "failed"] } }).sort({ createdAt: 1 }).limit(limit).toArray();
+      return docs.map((d) => {
+        const { _id, ...rest } = d;
+        return rest;
+      });
+    }
+    const state = ensureLocalFile();
+    return (state.webhookEvents || []).filter((r) => r.status === "pending" || r.status === "failed").slice(0, limit);
+  },
+  async getOutboxStats() {
+    const webhookUrlConfigured = Boolean(process.env.N8N_WEBHOOK_URL || process.env.ORDER_BACKUP_WEBHOOK_URL);
+    const db = await getMongoDb();
+    if (db) {
+      const total = await db.collection("webhook_outbox").countDocuments();
+      const delivered = await db.collection("webhook_outbox").countDocuments({ status: "delivered" });
+      const pending = await db.collection("webhook_outbox").countDocuments({ status: "pending" });
+      const failed = await db.collection("webhook_outbox").countDocuments({ status: "failed" });
+      return { total, delivered, pending, failed, webhookUrlConfigured };
+    }
+    const state = ensureLocalFile();
+    const list = state.webhookEvents || [];
+    return {
+      total: list.length,
+      delivered: list.filter((r) => r.status === "delivered").length,
+      pending: list.filter((r) => r.status === "pending").length,
+      failed: list.filter((r) => r.status === "failed").length,
+      webhookUrlConfigured
+    };
   }
 };
 
@@ -760,13 +851,291 @@ function validateAndPriceOrder(items) {
   };
 }
 
+// server/_lib/webhook.ts
+import http from "http";
+import https from "https";
+import crypto2 from "crypto";
+function buildProductsSummary(items) {
+  if (!items || items.length === 0) return "No items";
+  return items.map((item) => `${item.productName} (${item.weight || "Std"}) x ${item.quantity}`).join(", ");
+}
+function formatFullAddress(customer) {
+  if (!customer) return "";
+  const parts = [
+    customer.address,
+    customer.villageTown,
+    customer.district,
+    customer.state || "Tamil Nadu",
+    customer.pincode ? `PIN: ${customer.pincode}` : ""
+  ].filter(Boolean);
+  return parts.join(", ");
+}
+function buildOrderCreatedPayload(order) {
+  const eventId = `evt_created_${order.id}_${Date.now()}_${Math.floor(100 + Math.random() * 900)}`;
+  const totalQty = (order.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 1), 0);
+  return {
+    eventId,
+    eventType: "order.created",
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    customer: {
+      fullName: order.customer.fullName,
+      phone: order.customer.phone,
+      email: order.customer.email || void 0,
+      formattedAddress: formatFullAddress(order.customer),
+      street: order.customer.address,
+      villageTown: order.customer.villageTown,
+      district: order.customer.district || "",
+      state: order.customer.state || "Tamil Nadu",
+      pincode: order.customer.pincode,
+      deliveryInstructions: order.customer.deliveryInstructions || void 0
+    },
+    items: (order.items || []).map((i) => ({
+      productId: i.productId,
+      productName: i.productName,
+      weight: i.weight,
+      quantity: i.quantity,
+      unitPrice: i.unitPrice,
+      totalPrice: i.unitPrice * i.quantity
+    })),
+    productsSummary: buildProductsSummary(order.items),
+    totalQuantity: totalQty,
+    subtotal: order.subtotal,
+    deliveryCharge: order.deliveryCharge,
+    discountAmount: order.discountAmount || 0,
+    totalAmount: order.totalAmount,
+    paymentMethod: order.paymentMethod,
+    paymentStatus: order.paymentStatus,
+    orderStatus: order.orderStatus,
+    notes: order.notes || ""
+  };
+}
+function buildStatusChangedPayload(order, previousStatus, newStatus) {
+  const eventId = `evt_status_${order.id}_${newStatus.replace(/\s+/g, "_")}_${Date.now()}`;
+  const totalQty = (order.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 1), 0);
+  return {
+    eventId,
+    eventType: "order.status_changed",
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    previousStatus,
+    orderStatus: newStatus,
+    customer: {
+      fullName: order.customer.fullName,
+      phone: order.customer.phone,
+      email: order.customer.email || void 0,
+      formattedAddress: formatFullAddress(order.customer),
+      street: order.customer.address,
+      villageTown: order.customer.villageTown,
+      district: order.customer.district || "",
+      state: order.customer.state || "Tamil Nadu",
+      pincode: order.customer.pincode,
+      deliveryInstructions: order.customer.deliveryInstructions || void 0
+    },
+    items: (order.items || []).map((i) => ({
+      productId: i.productId,
+      productName: i.productName,
+      weight: i.weight,
+      quantity: i.quantity,
+      unitPrice: i.unitPrice,
+      totalPrice: i.unitPrice * i.quantity
+    })),
+    productsSummary: buildProductsSummary(order.items),
+    totalQuantity: totalQty,
+    subtotal: order.subtotal,
+    deliveryCharge: order.deliveryCharge,
+    discountAmount: order.discountAmount || 0,
+    totalAmount: order.totalAmount,
+    paymentMethod: order.paymentMethod,
+    paymentStatus: order.paymentStatus,
+    notes: order.notes || ""
+  };
+}
+function sendHttpRequest(urlStr, bodyJson, headers, timeoutMs = 6e3) {
+  return new Promise((resolve, reject) => {
+    try {
+      const url = new URL(urlStr);
+      const isHttps = url.protocol === "https:";
+      const transport = isHttps ? https : http;
+      const req = transport.request(
+        url,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(bodyJson),
+            "User-Agent": "KVN-Tea-Powder-Webhook-Agent/1.0",
+            ...headers
+          },
+          timeout: timeoutMs
+        },
+        (res) => {
+          let responseData = "";
+          res.on("data", (chunk) => {
+            responseData += chunk;
+          });
+          res.on("end", () => {
+            resolve({ status: res.statusCode || 200, data: responseData });
+          });
+        }
+      );
+      req.on("timeout", () => {
+        req.destroy(new Error(`Webhook request timed out after ${timeoutMs}ms`));
+      });
+      req.on("error", (err) => {
+        reject(err);
+      });
+      req.write(bodyJson);
+      req.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+var webhookService = {
+  getWebhookUrl() {
+    return (process.env.N8N_WEBHOOK_URL || process.env.ORDER_BACKUP_WEBHOOK_URL || "").trim();
+  },
+  getWebhookSecret() {
+    return (process.env.N8N_WEBHOOK_SECRET || "").trim();
+  },
+  isConfigured() {
+    return Boolean(this.getWebhookUrl());
+  },
+  /**
+   * Queue and attempt immediate dispatch for an event.
+   * NEVER throws or blocks caller execution.
+   */
+  async queueAndDispatch(payload) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const record = {
+      id: `outbox-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      eventId: payload.eventId,
+      eventType: payload.eventType,
+      orderId: payload.orderId,
+      orderNumber: payload.orderNumber,
+      payload,
+      status: "pending",
+      attempts: 0,
+      maxAttempts: 5,
+      createdAt: now,
+      updatedAt: now
+    };
+    try {
+      await serverDb.saveOutboxRecord(record);
+    } catch (err) {
+      console.warn("Failed to save webhook to outbox store:", err);
+    }
+    this.dispatchRecord(record).catch((err) => {
+      console.warn(`Webhook initial dispatch non-fatal failure for ${payload.eventId}:`, err?.message || err);
+    });
+    return record;
+  },
+  /**
+   * Execute dispatch for an outbox record
+   */
+  async dispatchRecord(record) {
+    const webhookUrl = this.getWebhookUrl();
+    if (!webhookUrl) {
+      record.lastError = "N8N_WEBHOOK_URL environment variable is not configured";
+      record.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      await serverDb.updateOutboxRecord(record.id, {
+        lastError: record.lastError,
+        updatedAt: record.updatedAt
+      });
+      return { success: false, error: record.lastError };
+    }
+    const bodyJson = JSON.stringify(record.payload);
+    const headers = {
+      "X-Event-Id": record.eventId,
+      "X-Event-Type": record.eventType,
+      "X-Order-Id": record.orderId,
+      "X-Order-Number": record.orderNumber,
+      "X-Delivery-Attempt": String(record.attempts + 1)
+    };
+    const secret = this.getWebhookSecret();
+    if (secret) {
+      const hmac = crypto2.createHmac("sha256", secret).update(bodyJson).digest("hex");
+      headers["X-Webhook-Signature"] = hmac;
+    }
+    record.attempts += 1;
+    record.lastAttemptAt = (/* @__PURE__ */ new Date()).toISOString();
+    try {
+      const res = await sendHttpRequest(webhookUrl, bodyJson, headers, 6e3);
+      if (res.status >= 200 && res.status < 300) {
+        record.status = "delivered";
+        record.deliveredAt = (/* @__PURE__ */ new Date()).toISOString();
+        record.lastError = void 0;
+        record.updatedAt = record.deliveredAt;
+        await serverDb.updateOutboxRecord(record.id, {
+          status: "delivered",
+          attempts: record.attempts,
+          lastAttemptAt: record.lastAttemptAt,
+          deliveredAt: record.deliveredAt,
+          updatedAt: record.updatedAt
+        });
+        return { success: true, status: res.status };
+      } else {
+        const errorMsg = `Webhook target returned HTTP ${res.status}: ${res.data.slice(0, 100)}`;
+        record.status = record.attempts >= record.maxAttempts ? "failed" : "pending";
+        record.lastError = errorMsg;
+        record.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        await serverDb.updateOutboxRecord(record.id, {
+          status: record.status,
+          attempts: record.attempts,
+          lastAttemptAt: record.lastAttemptAt,
+          lastError: record.lastError,
+          updatedAt: record.updatedAt
+        });
+        return { success: false, status: res.status, error: errorMsg };
+      }
+    } catch (err) {
+      const errorMsg = err.message || "Network request failed";
+      record.status = record.attempts >= record.maxAttempts ? "failed" : "pending";
+      record.lastError = errorMsg;
+      record.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      await serverDb.updateOutboxRecord(record.id, {
+        status: record.status,
+        attempts: record.attempts,
+        lastAttemptAt: record.lastAttemptAt,
+        lastError: record.lastError,
+        updatedAt: record.updatedAt
+      });
+      return { success: false, error: errorMsg };
+    }
+  },
+  /**
+   * Process all pending or failed outbox records
+   */
+  async retryPendingEvents() {
+    const pendingRecords = await serverDb.getPendingOutboxRecords();
+    let succeeded = 0;
+    let failed = 0;
+    for (const record of pendingRecords) {
+      const result = await this.dispatchRecord(record);
+      if (result.success) {
+        succeeded++;
+      } else {
+        failed++;
+      }
+    }
+    return {
+      processed: pendingRecords.length,
+      succeeded,
+      failed
+    };
+  }
+};
+
 // server/index.ts
 var app = express();
 app.use(express.json({ limit: "2mb" }));
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, x-admin-passcode");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, x-admin-passcode, x-admin-key");
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -787,14 +1156,14 @@ function authenticateCustomer(req, res, next) {
 }
 function authenticateAdmin(req, res, next) {
   const authHeader = req.headers.authorization;
-  const adminKey = req.headers["x-admin-passcode"];
+  const adminKey = req.headers["x-admin-passcode"] || req.headers["x-admin-key"];
   if (authHeader && authHeader.startsWith("Bearer ")) {
-    const token = authHeader.slice(7);
-    if (verifyAdminToken(token)) {
+    const token = authHeader.slice(7).trim();
+    if (verifyAdminToken(token) || verifyAdminPasscode(token)) {
       return next();
     }
   }
-  if (adminKey && verifyAdminPasscode(adminKey)) {
+  if (adminKey && (verifyAdminPasscode(adminKey) || verifyAdminToken(adminKey))) {
     return next();
   }
   return res.status(403).json({ error: "Unauthorized: Admin access required" });
@@ -1049,6 +1418,13 @@ router.post("/orders", async (req, res) => {
         }
       }
     }
+    try {
+      webhookService.queueAndDispatch(buildOrderCreatedPayload(order)).catch((err) => {
+        console.warn("Webhook queue notice:", err);
+      });
+    } catch (err) {
+      console.warn("Non-fatal webhook queue error:", err);
+    }
     return res.status(201).json({
       success: true,
       message: "Order placed successfully and saved to database",
@@ -1122,18 +1498,52 @@ router.patch("/admin/orders/:id/status", authenticateAdmin, async (req, res) => 
     if (!status || !validStatuses.includes(status)) {
       return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(", ")}` });
     }
-    const updated = await serverDb.updateOrderStatus(req.params.id, status, note);
-    if (!updated) {
+    const result = await serverDb.updateOrderStatus(req.params.id, status, note);
+    if (!result) {
       return res.status(404).json({ error: "Order not found" });
+    }
+    if (result.changed) {
+      try {
+        webhookService.queueAndDispatch(
+          buildStatusChangedPayload(result.order, result.previousStatus, status)
+        ).catch((err) => console.warn("Status webhook notice:", err));
+      } catch (err) {
+        console.warn("Non-fatal webhook queue notice:", err);
+      }
     }
     return res.json({
       success: true,
       message: `Order status updated to ${status}`,
-      order: updated
+      order: result.order,
+      changed: result.changed
     });
   } catch (err) {
     console.error("Update status error:", err);
     return res.status(500).json({ error: "Failed to update order status" });
+  }
+});
+router.get("/admin/webhooks/status", authenticateAdmin, async (_req, res) => {
+  try {
+    const stats = await serverDb.getOutboxStats();
+    return res.json({
+      configured: webhookService.isConfigured(),
+      webhookUrl: webhookService.getWebhookUrl() ? "Configured (Active)" : "Not Set",
+      stats
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to fetch webhook status" });
+  }
+});
+router.post("/admin/webhooks/retry", authenticateAdmin, async (_req, res) => {
+  try {
+    const result = await webhookService.retryPendingEvents();
+    return res.json({
+      success: true,
+      message: `Processed ${result.processed} events (${result.succeeded} delivered, ${result.failed} failed)`,
+      result
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to retry webhook events" });
   }
 });
 router.get("/admin/stats", authenticateAdmin, async (_req, res) => {

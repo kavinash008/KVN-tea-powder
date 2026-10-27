@@ -11,6 +11,7 @@ import {
 } from './_lib/auth';
 import { validatePhone, validateAddress, validateAndPriceOrder, validatePincode } from './_lib/validation';
 import { OrderStatus } from '../src/types';
+import { webhookService, buildOrderCreatedPayload, buildStatusChangedPayload } from './_lib/webhook';
 
 const app = express();
 
@@ -21,7 +22,7 @@ app.use(express.json({ limit: '2mb' }));
 app.use((req: Request, res: Response, next: NextFunction) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-admin-passcode');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-admin-passcode, x-admin-key');
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -43,19 +44,19 @@ function authenticateCustomer(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-// Middleware: Admin Authentication
+// Middleware: Admin Authentication (Supports signed JWT or configured admin passcode)
 function authenticateAdmin(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
-  const adminKey = req.headers['x-admin-passcode'] as string;
+  const adminKey = (req.headers['x-admin-passcode'] || req.headers['x-admin-key']) as string;
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.slice(7);
-    if (verifyAdminToken(token)) {
+    const token = authHeader.slice(7).trim();
+    if (verifyAdminToken(token) || verifyAdminPasscode(token)) {
       return next();
     }
   }
 
-  if (adminKey && verifyAdminPasscode(adminKey)) {
+  if (adminKey && (verifyAdminPasscode(adminKey) || verifyAdminToken(adminKey))) {
     return next();
   }
 
@@ -367,6 +368,15 @@ router.post('/orders', async (req: Request, res: Response) => {
       }
     }
 
+    // Queue and dispatch n8n backup webhook asynchronously (does not block or fail user order)
+    try {
+      webhookService.queueAndDispatch(buildOrderCreatedPayload(order)).catch((err) => {
+        console.warn('Webhook queue notice:', err);
+      });
+    } catch (err) {
+      console.warn('Non-fatal webhook queue error:', err);
+    }
+
     return res.status(201).json({
       success: true,
       message: 'Order placed successfully and saved to database',
@@ -458,19 +468,59 @@ router.patch('/admin/orders/:id/status', authenticateAdmin, async (req: Request,
       return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
     }
 
-    const updated = await serverDb.updateOrderStatus(req.params.id, status, note);
-    if (!updated) {
+    const result = await serverDb.updateOrderStatus(req.params.id, status, note);
+    if (!result) {
       return res.status(404).json({ error: 'Order not found' });
+    }
+
+    // Only emit status_changed event when an actual transition occurred
+    if (result.changed) {
+      try {
+        webhookService.queueAndDispatch(
+          buildStatusChangedPayload(result.order, result.previousStatus, status)
+        ).catch((err) => console.warn('Status webhook notice:', err));
+      } catch (err) {
+        console.warn('Non-fatal webhook queue notice:', err);
+      }
     }
 
     return res.json({
       success: true,
       message: `Order status updated to ${status}`,
-      order: updated,
+      order: result.order,
+      changed: result.changed,
     });
   } catch (err: any) {
     console.error('Update status error:', err);
     return res.status(500).json({ error: 'Failed to update order status' });
+  }
+});
+
+// Admin: Get Webhook Outbox Status
+router.get('/admin/webhooks/status', authenticateAdmin, async (_req: Request, res: Response) => {
+  try {
+    const stats = await serverDb.getOutboxStats();
+    return res.json({
+      configured: webhookService.isConfigured(),
+      webhookUrl: webhookService.getWebhookUrl() ? 'Configured (Active)' : 'Not Set',
+      stats,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to fetch webhook status' });
+  }
+});
+
+// Admin: Retry Pending / Failed Webhook Events
+router.post('/admin/webhooks/retry', authenticateAdmin, async (_req: Request, res: Response) => {
+  try {
+    const result = await webhookService.retryPendingEvents();
+    return res.json({
+      success: true,
+      message: `Processed ${result.processed} events (${result.succeeded} delivered, ${result.failed} failed)`,
+      result,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to retry webhook events' });
   }
 });
 

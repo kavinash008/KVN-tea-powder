@@ -12,6 +12,23 @@ function getHeaders(token?: string | null): Record<string, string> {
   return headers;
 }
 
+function getAdminHeaders(token?: string | null): Record<string, string> {
+  let cleanToken = token;
+  if (!cleanToken && typeof window !== 'undefined') {
+    try {
+      cleanToken = localStorage.getItem('kvn_admin_token') || 'kvn2026';
+    } catch {
+      cleanToken = 'kvn2026';
+    }
+  }
+  const effectiveToken = cleanToken || 'kvn2026';
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${effectiveToken}`,
+    'x-admin-passcode': effectiveToken,
+  };
+}
+
 /**
  * Safe fetch helper that reads response text first before attempting JSON parse.
  * Prevents "Unexpected token 'A', 'A server e'... is not valid JSON" crashes.
@@ -163,27 +180,40 @@ export const api = {
     });
   },
 
-  async adminGetOrders(token: string, status?: string): Promise<Order[]> {
+  async adminGetOrders(token?: string, status?: string): Promise<Order[]> {
     const url = status && status !== 'all' ? `${API_BASE}/admin/orders?status=${encodeURIComponent(status)}` : `${API_BASE}/admin/orders`;
     const json = await safeRequest<{ orders: Order[] }>(url, {
-      headers: getHeaders(token),
+      headers: getAdminHeaders(token),
     });
     return json.orders || [];
   },
 
-  async adminUpdateOrderStatus(token: string, id: string, status: OrderStatus, note?: string): Promise<Order> {
+  async adminUpdateOrderStatus(token: string | undefined, id: string, status: OrderStatus, note?: string): Promise<Order> {
     const json = await safeRequest<{ order: Order }>(`${API_BASE}/admin/orders/${encodeURIComponent(id)}/status`, {
       method: 'PATCH',
-      headers: getHeaders(token),
+      headers: getAdminHeaders(token),
       body: JSON.stringify({ status, note }),
     });
     return json.order;
   },
 
-  async adminGetStats(token: string): Promise<any> {
+  async adminGetStats(token?: string): Promise<any> {
     const json = await safeRequest<{ stats: any }>(`${API_BASE}/admin/stats`, {
-      headers: getHeaders(token),
+      headers: getAdminHeaders(token),
     });
     return json.stats;
+  },
+
+  async adminGetWebhookStatus(token?: string): Promise<any> {
+    return safeRequest<any>(`${API_BASE}/admin/webhooks/status`, {
+      headers: getAdminHeaders(token),
+    });
+  },
+
+  async adminRetryWebhooks(token?: string): Promise<any> {
+    return safeRequest<any>(`${API_BASE}/admin/webhooks/retry`, {
+      method: 'POST',
+      headers: getAdminHeaders(token),
+    });
   },
 };

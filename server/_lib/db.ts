@@ -4,9 +4,12 @@ import path from 'path';
 import { Order, OrderStatus, CustomerAddress } from '../../src/types';
 import { INITIAL_PRODUCTS } from '../../src/data/initialData';
 import { UserDocument, StoreState } from './types';
+import { WebhookOutboxRecord } from './webhook';
 
 let cachedMongoClient: MongoClient | null = null;
 let cachedDb: Db | null = null;
+let mongoConnectPromise: Promise<Db | null> | null = null;
+let mongoFailedUntil = 0;
 
 const MONGODB_URI = process.env.MONGODB_URI || process.env.DATABASE_URL || '';
 const MONGODB_DB_NAME = process.env.MONGODB_DB_NAME || 'kvn_store';
@@ -39,6 +42,7 @@ function ensureLocalFile(): StoreState {
       orders: [],
       users: [],
       products: INITIAL_PRODUCTS,
+      webhookEvents: [],
       lastUpdated: new Date().toISOString(),
     };
     try {
@@ -51,12 +55,15 @@ function ensureLocalFile(): StoreState {
 
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
-    return JSON.parse(content);
+    const parsed = JSON.parse(content);
+    parsed.webhookEvents = parsed.webhookEvents || [];
+    return parsed;
   } catch {
     return {
       orders: [],
       users: [],
       products: INITIAL_PRODUCTS,
+      webhookEvents: [],
       lastUpdated: new Date().toISOString(),
     };
   }
@@ -81,19 +88,11 @@ async function saveLocalFile(state: StoreState): Promise<void> {
   return fileWriteLock;
 }
 
-let isMongoConnecting = false;
-let mongoFailedUntil = 0;
-
 /**
- * Connect to MongoDB Atlas if connection string exists.
+ * Connect to MongoDB Atlas with thread-safe promise caching and optimal timeout.
  */
 async function getMongoDb(): Promise<Db | null> {
   if (!MONGODB_URI) {
-    return null;
-  }
-
-  // If connection failed recently (e.g. IP whitelist issue), back off to prevent Vercel 10s function timeouts
-  if (Date.now() < mongoFailedUntil) {
     return null;
   }
 
@@ -101,35 +100,47 @@ async function getMongoDb(): Promise<Db | null> {
     return cachedDb;
   }
 
-  if (isMongoConnecting) {
+  if (Date.now() < mongoFailedUntil) {
     return null;
   }
 
-  try {
-    isMongoConnecting = true;
-    if (!cachedMongoClient) {
-      cachedMongoClient = new MongoClient(MONGODB_URI, {
-        connectTimeoutMS: 2500,
-        serverSelectionTimeoutMS: 2500,
-      });
-      await cachedMongoClient.connect();
+  // If a connection attempt is already in flight, reuse the promise to prevent dropped concurrent requests
+  if (mongoConnectPromise) {
+    return await mongoConnectPromise;
+  }
+
+  mongoConnectPromise = (async () => {
+    try {
+      if (!cachedMongoClient) {
+        cachedMongoClient = new MongoClient(MONGODB_URI, {
+          connectTimeoutMS: 5000,
+          serverSelectionTimeoutMS: 5000,
+        });
+        await cachedMongoClient.connect();
+      }
+      cachedDb = cachedMongoClient.db(MONGODB_DB_NAME);
+
+      // Ensure indexes in background
+      cachedDb.collection('orders').createIndex({ orderNumber: 1 }, { unique: true }).catch(() => {});
+      cachedDb.collection('orders').createIndex({ 'customer.phone': 1 }).catch(() => {});
+      cachedDb.collection('orders').createIndex({ createdAt: -1 }).catch(() => {});
+      cachedDb.collection('users').createIndex({ phone: 1 }, { unique: true }).catch(() => {});
+      cachedDb.collection('webhook_outbox').createIndex({ eventId: 1 }, { unique: true }).catch(() => {});
+      cachedDb.collection('webhook_outbox').createIndex({ status: 1 }).catch(() => {});
+
+      return cachedDb;
+    } catch (err) {
+      console.warn('MongoDB Atlas connection failed:', err);
+      mongoFailedUntil = Date.now() + 3000; // 3-second backoff
+      cachedMongoClient = null;
+      cachedDb = null;
+      return null;
+    } finally {
+      mongoConnectPromise = null;
     }
-    cachedDb = cachedMongoClient.db(MONGODB_DB_NAME);
-    isMongoConnecting = false;
+  })();
 
-    // Ensure indexes once in background
-    cachedDb.collection('orders').createIndex({ orderNumber: 1 }, { unique: true }).catch(() => {});
-    cachedDb.collection('orders').createIndex({ 'customer.phone': 1 }).catch(() => {});
-    cachedDb.collection('orders').createIndex({ createdAt: -1 }).catch(() => {});
-    cachedDb.collection('users').createIndex({ phone: 1 }, { unique: true }).catch(() => {});
-
-    return cachedDb;
-  } catch (err) {
-    isMongoConnecting = false;
-    mongoFailedUntil = Date.now() + 60000; // 1-minute backoff
-    console.warn('MongoDB Atlas connection timed out or failed. Operating in high-performance persistent fallback store:', err);
-    return null;
-  }
+  return await mongoConnectPromise;
 }
 
 /**
@@ -238,7 +249,13 @@ export const serverDb = {
       updatedAt: now,
     };
 
-    const db = await getMongoDb();
+    let db = await getMongoDb();
+    if (!db && MONGODB_URI) {
+      // Retry once to ensure persistence to shared cloud database
+      mongoFailedUntil = 0;
+      db = await getMongoDb();
+    }
+
     if (db) {
       await db.collection('orders').insertOne(newOrder as any);
       return newOrder;
@@ -250,14 +267,30 @@ export const serverDb = {
     return newOrder;
   },
 
-  async updateOrderStatus(orderId: string, status: OrderStatus, note?: string): Promise<Order | null> {
+  async updateOrderStatus(
+    orderId: string,
+    status: OrderStatus,
+    note?: string
+  ): Promise<{ order: Order; previousStatus: OrderStatus; changed: boolean } | null> {
     const now = new Date().toISOString();
-    const db = await getMongoDb();
+    let db = await getMongoDb();
+    if (!db && MONGODB_URI) {
+      mongoFailedUntil = 0;
+      db = await getMongoDb();
+    }
+
     if (db) {
       const existing = await db.collection('orders').findOne({
         $or: [{ id: orderId }, { orderNumber: orderId }],
       });
       if (!existing) return null;
+
+      const previousStatus = existing.orderStatus as OrderStatus;
+      if (previousStatus === status) {
+        // Status has not changed; avoid duplicate history or duplicate notifications
+        const { _id, ...rest } = existing as any;
+        return { order: rest as Order, previousStatus, changed: false };
+      }
 
       const newHistoryItem = {
         status,
@@ -279,7 +312,7 @@ export const serverDb = {
 
       const updated = await db.collection('orders').findOne({ _id: existing._id });
       const { _id, ...rest } = updated as any;
-      return rest as Order;
+      return { order: rest as Order, previousStatus, changed: true };
     }
 
     const state = ensureLocalFile();
@@ -287,6 +320,11 @@ export const serverDb = {
     if (index === -1) return null;
 
     const order = state.orders[index];
+    const previousStatus = order.orderStatus;
+    if (previousStatus === status) {
+      return { order, previousStatus, changed: false };
+    }
+
     order.orderStatus = status;
     order.updatedAt = now;
     if (status === 'Delivered' && order.paymentMethod === 'COD') {
@@ -299,7 +337,7 @@ export const serverDb = {
     });
 
     await saveLocalFile(state);
-    return order;
+    return { order, previousStatus, changed: true };
   },
 
   // ===================== CUSTOMERS / USERS =====================
@@ -374,7 +412,12 @@ export const serverDb = {
       updatedAt: now,
     };
 
-    const db = await getMongoDb();
+    let db = await getMongoDb();
+    if (!db && MONGODB_URI) {
+      mongoFailedUntil = 0;
+      db = await getMongoDb();
+    }
+
     if (db) {
       await db.collection('users').insertOne(newUser as any);
       return newUser;
@@ -518,5 +561,74 @@ export const serverDb = {
     }
     await saveLocalFile(state);
     return true;
+  },
+
+  // ===================== WEBHOOK OUTBOX =====================
+
+  async saveOutboxRecord(record: WebhookOutboxRecord): Promise<void> {
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection('webhook_outbox').insertOne(record as any);
+      return;
+    }
+    const state = ensureLocalFile();
+    state.webhookEvents = state.webhookEvents || [];
+    state.webhookEvents.push(record);
+    await saveLocalFile(state);
+  },
+
+  async updateOutboxRecord(id: string, updates: Partial<WebhookOutboxRecord>): Promise<void> {
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection('webhook_outbox').updateOne({ id }, { $set: updates });
+      return;
+    }
+    const state = ensureLocalFile();
+    if (!state.webhookEvents) return;
+    const idx = state.webhookEvents.findIndex((r) => r.id === id);
+    if (idx >= 0) {
+      state.webhookEvents[idx] = { ...state.webhookEvents[idx], ...updates };
+      await saveLocalFile(state);
+    }
+  },
+
+  async getPendingOutboxRecords(limit = 25): Promise<WebhookOutboxRecord[]> {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection('webhook_outbox')
+        .find({ status: { $in: ['pending', 'failed'] } })
+        .sort({ createdAt: 1 })
+        .limit(limit)
+        .toArray();
+      return docs.map((d: any) => {
+        const { _id, ...rest } = d;
+        return rest as WebhookOutboxRecord;
+      });
+    }
+    const state = ensureLocalFile();
+    return (state.webhookEvents || [])
+      .filter((r) => r.status === 'pending' || r.status === 'failed')
+      .slice(0, limit);
+  },
+
+  async getOutboxStats(): Promise<{ total: number; delivered: number; pending: number; failed: number; webhookUrlConfigured: boolean }> {
+    const webhookUrlConfigured = Boolean(process.env.N8N_WEBHOOK_URL || process.env.ORDER_BACKUP_WEBHOOK_URL);
+    const db = await getMongoDb();
+    if (db) {
+      const total = await db.collection('webhook_outbox').countDocuments();
+      const delivered = await db.collection('webhook_outbox').countDocuments({ status: 'delivered' });
+      const pending = await db.collection('webhook_outbox').countDocuments({ status: 'pending' });
+      const failed = await db.collection('webhook_outbox').countDocuments({ status: 'failed' });
+      return { total, delivered, pending, failed, webhookUrlConfigured };
+    }
+    const state = ensureLocalFile();
+    const list = state.webhookEvents || [];
+    return {
+      total: list.length,
+      delivered: list.filter((r) => r.status === 'delivered').length,
+      pending: list.filter((r) => r.status === 'pending').length,
+      failed: list.filter((r) => r.status === 'failed').length,
+      webhookUrlConfigured,
+    };
   },
 };
