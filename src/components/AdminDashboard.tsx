@@ -133,7 +133,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
   const handleSyncExcel = async () => {
     try {
       setSyncingExcel(true);
-      const token = localStorage.getItem('kvn_admin_token') || 'kvn2026';
+      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
       const res = await api.adminSyncExcel(token);
       showAdminToast(res?.message || 'Excel sync executed');
       await loadServerOrders();
@@ -147,7 +147,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
   const handleRetryWhatsApp = async (orderId: string) => {
     try {
       setRetryingWaOrderId(orderId);
-      const token = localStorage.getItem('kvn_admin_token') || 'kvn2026';
+      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
       const res = await api.adminRetryWhatsApp(token, orderId);
       if (res.success) {
         showAdminToast('WhatsApp confirmation message dispatched!');
@@ -179,7 +179,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
     try {
       setIsSyncingOrders(true);
       setOrdersSyncError(null);
-      const token = localStorage.getItem('kvn_admin_token') || 'kvn2026';
+      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
       const serverOrders = await api.adminGetOrders(token, orderStatusFilter);
       if (Array.isArray(serverOrders)) {
         setOrders(serverOrders);
@@ -207,7 +207,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
 
   const handleUpdateOrderStatus = async (orderId: string, newStatus: any) => {
     try {
-      const token = localStorage.getItem('kvn_admin_token') || 'kvn2026';
+      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
       const updated = await api.adminUpdateOrderStatus(token, orderId, newStatus);
       setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
       if (orderDetailModal && orderDetailModal.id === orderId) {

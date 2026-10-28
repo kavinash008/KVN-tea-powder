@@ -975,7 +975,7 @@ var serverDb = {
 import crypto from "crypto";
 var JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET || "kvn-teapowder-production-secret-key-2026";
 var ADMIN_PASSCODES = [
-  (process.env.ADMIN_PASSWORD || "kvn2026").trim(),
+  (process.env.ADMIN_PASSWORD || "kavin008").trim(),
   "9787513911",
   "6383050287"
 ];

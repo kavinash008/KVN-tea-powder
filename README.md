@@ -40,7 +40,7 @@
   * **Direct URL**: Navigate to `/#admin` (e.g. `https://kvnteapowder.vercel.app/#admin`).
   * **Keyboard Shortcut**: Press `Ctrl` + `Alt` + `A` (or `Cmd` + `Alt` + `A`).
   * **Discreet Footer Lock**: Click the subtle lock `🔒` icon in the footer.
-* **Passcode Protected**: Secure admin authentication via `POST /api/admin/login` (passcode: `kvn2026` or registered phone `9787513911`).
+* **Passcode Protected**: Secure admin authentication via `POST /api/admin/login` (passcode: `kavin008` or registered phone `9787513911`).
 * **Live Order Stream**: 15-second automatic polling and manual sync button to review new customer orders instantly.
 * **Order Lifecycle Controls**: Update statuses (`Order Confirmed`, `Processing`, `Dispatched`, `Out for Delivery`, `Delivered`, `Cancelled`) with automatic status history logging.
 
@@ -77,7 +77,7 @@ npm run dev
 
 Visit the app in your browser:
 * **Customer Store**: `http://localhost:3000/`
-* **Admin Portal**: `http://localhost:3000/#admin` *(Passcode: `kvn2026`)*
+* **Admin Portal**: `http://localhost:3000/#admin` *(Passcode: `kavin008`)*
 
 ### Build for Production
 ```bash
@@ -92,7 +92,7 @@ npm run build
 | :--- | :--- |
 | `MONGODB_URI` | MongoDB Atlas connection string (`mongodb+srv://...`) |
 | `MONGODB_DB_NAME` | Database name (e.g. `kvn_store`) |
-| `ADMIN_PASSWORD` | Passcode for Krishnamoorthy to log into the Admin Dashboard (`kvn2026`) |
+| `ADMIN_PASSWORD` | Passcode for Krishnamoorthy to log into the Admin Dashboard (`kavin008`) |
 | `JWT_SECRET` | Secret key for signing customer and admin session tokens |
 
 ---

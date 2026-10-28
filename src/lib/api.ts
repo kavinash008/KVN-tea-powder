@@ -16,12 +16,12 @@ function getAdminHeaders(token?: string | null): Record<string, string> {
   let cleanToken = token;
   if (!cleanToken && typeof window !== 'undefined') {
     try {
-      cleanToken = localStorage.getItem('kvn_admin_token') || 'kvn2026';
+      cleanToken = localStorage.getItem('kvn_admin_token') || 'kavin008';
     } catch {
-      cleanToken = 'kvn2026';
+      cleanToken = 'kavin008';
     }
   }
-  const effectiveToken = cleanToken || 'kvn2026';
+  const effectiveToken = cleanToken || 'kavin008';
   return {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${effectiveToken}`,
