@@ -17,7 +17,10 @@ import {
   AlertCircle,
   Navigation,
   Loader2,
-  Edit3
+  Edit3,
+  Mail,
+  KeyRound,
+  Smartphone
 } from 'lucide-react';
 
 interface CustomerAccountModalProps {
@@ -37,6 +40,13 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
     savedAddresses,
     loginCustomer,
     registerCustomer,
+    loginWithGoogle,
+    loginWithEmail,
+    registerWithEmail,
+    sendPasswordReset,
+    sendPhoneOtp,
+    verifyPhoneOtp,
+    isFirebaseAvailable,
     logoutCustomer,
     addSavedAddress,
     deleteSavedAddress,
@@ -47,10 +57,23 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
 
   // Mode when not logged in: 'login' | 'register'
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authMethod, setAuthMethod] = useState<'password' | 'otp' | 'email'>('password');
 
   // Login form state
   const [loginPhone, setLoginPhone] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+
+  // Phone OTP state
+  const [otpPhone, setOtpPhone] = useState('');
+  const [otpCode, setOtpCode] = useState('');
+  const [confirmationResult, setConfirmationResult] = useState<any>(null);
+  const [otpSent, setOtpSent] = useState(false);
+
+  // Email form state
+  const [emailInput, setEmailInput] = useState('');
+  const [emailPassword, setEmailPassword] = useState('');
+  const [forgotPasswordEmail, setForgotPasswordEmail] = useState('');
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
 
   // Register form state
   const [regName, setRegName] = useState('');
@@ -111,6 +134,83 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
   };
 
   if (!isOpen) return null;
+
+  const handleGoogleLogin = async () => {
+    setFormError('');
+    setSubmitting(true);
+    const res = await loginWithGoogle();
+    setSubmitting(false);
+    if (!res.success) {
+      setFormError(res.error || 'Google Sign-In failed');
+    }
+  };
+
+  const handleSendOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError('');
+    const clean = otpPhone.replace(/\D/g, '').slice(-10);
+    if (clean.length < 10) {
+      setFormError('Please enter a valid 10-digit mobile number');
+      return;
+    }
+    setSubmitting(true);
+    const res = await sendPhoneOtp(clean, 'recaptcha-modal-container');
+    setSubmitting(false);
+    if (res.success && res.confirmationResult) {
+      setConfirmationResult(res.confirmationResult);
+      setOtpSent(true);
+    } else {
+      setFormError(res.error || 'Failed to send OTP. Please check your number.');
+    }
+  };
+
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError('');
+    if (!otpCode || otpCode.trim().length < 6) {
+      setFormError('Please enter the 6-digit OTP received via SMS');
+      return;
+    }
+    setSubmitting(true);
+    const res = await verifyPhoneOtp(confirmationResult, otpCode.trim(), regName || undefined);
+    setSubmitting(false);
+    if (!res.success) {
+      setFormError(res.error || 'Invalid OTP code');
+    }
+  };
+
+  const handleEmailAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError('');
+    setSubmitting(true);
+    let res;
+    if (authMode === 'login') {
+      res = await loginWithEmail(emailInput, emailPassword);
+    } else {
+      res = await registerWithEmail(emailInput, emailPassword, regName, regPhone);
+    }
+    setSubmitting(false);
+    if (!res.success) {
+      setFormError(res.error || 'Authentication failed');
+    }
+  };
+
+  const handlePasswordRecovery = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError('');
+    if (!forgotPasswordEmail) {
+      setFormError('Please enter your registered email address');
+      return;
+    }
+    setSubmitting(true);
+    const res = await sendPasswordReset(forgotPasswordEmail);
+    setSubmitting(false);
+    if (res.success) {
+      setShowForgotPassword(false);
+    } else {
+      setFormError(res.error || 'Failed to send password recovery email');
+    }
+  };
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -334,7 +434,231 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
               </div>
             )}
 
-            {authMode === 'login' ? (
+            {/* Google Sign In (One-click) */}
+            <button
+              type="button"
+              onClick={handleGoogleLogin}
+              disabled={submitting}
+              className="w-full py-2.5 px-4 bg-white border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-semibold rounded-xl flex items-center justify-center gap-2.5 shadow-2xs transition-all cursor-pointer mb-3"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24">
+                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+              </svg>
+              Continue with Google
+            </button>
+
+            <div className="flex items-center gap-3 my-3">
+              <div className="h-px bg-stone-200 flex-1"></div>
+              <span className="text-[11px] text-stone-400 uppercase font-medium">Or choose method</span>
+              <div className="h-px bg-stone-200 flex-1"></div>
+            </div>
+
+            {/* Method Toggle */}
+            <div className="grid grid-cols-3 gap-1 p-1 bg-stone-100 rounded-xl mb-4 text-[11px] font-semibold text-stone-600">
+              <button
+                type="button"
+                onClick={() => { setAuthMethod('password'); setFormError(''); }}
+                className={`py-1.5 rounded-lg transition-all ${authMethod === 'password' ? 'bg-white shadow-2xs text-[#143728] font-bold' : 'hover:text-stone-900'}`}
+              >
+                Mobile + Pass
+              </button>
+              <button
+                type="button"
+                onClick={() => { setAuthMethod('otp'); setFormError(''); }}
+                className={`py-1.5 rounded-lg transition-all ${authMethod === 'otp' ? 'bg-white shadow-2xs text-[#143728] font-bold' : 'hover:text-stone-900'}`}
+              >
+                Phone OTP
+              </button>
+              <button
+                type="button"
+                onClick={() => { setAuthMethod('email'); setFormError(''); }}
+                className={`py-1.5 rounded-lg transition-all ${authMethod === 'email' ? 'bg-white shadow-2xs text-[#143728] font-bold' : 'hover:text-stone-900'}`}
+              >
+                Email
+              </button>
+            </div>
+
+            <div id="recaptcha-modal-container"></div>
+
+            {/* PHONE OTP AUTH FLOW */}
+            {authMethod === 'otp' ? (
+              <div className="space-y-4">
+                {!otpSent ? (
+                  <form onSubmit={handleSendOtp} className="space-y-3.5">
+                    <p className="text-xs text-stone-500">
+                      Sign in or register instantly by receiving a secure OTP via SMS to your mobile phone.
+                    </p>
+                    {authMode === 'register' && (
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 mb-1">Full Name</label>
+                        <input
+                          type="text"
+                          required
+                          value={regName}
+                          onChange={(e) => setRegName(e.target.value)}
+                          placeholder="Your Name"
+                          className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                        />
+                      </div>
+                    )}
+                    <div>
+                      <label className="block text-xs font-semibold text-stone-700 mb-1">Mobile Number (India) *</label>
+                      <div className="flex">
+                        <span className="inline-flex items-center px-3 text-xs bg-stone-100 border border-r-0 border-stone-200 rounded-l-xl text-stone-600 font-semibold">+91</span>
+                        <input
+                          type="tel"
+                          required
+                          maxLength={10}
+                          value={otpPhone}
+                          onChange={(e) => setOtpPhone(e.target.value)}
+                          placeholder="10-digit mobile number"
+                          className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-r-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                        />
+                      </div>
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={submitting}
+                      className="w-full py-2.5 bg-[#143728] text-white text-xs font-bold rounded-xl hover:bg-[#204e37] transition-all disabled:opacity-50 cursor-pointer"
+                    >
+                      {submitting ? 'Sending OTP via SMS...' : 'Send OTP via SMS'}
+                    </button>
+                  </form>
+                ) : (
+                  <form onSubmit={handleVerifyOtp} className="space-y-3.5">
+                    <p className="text-xs text-stone-500">
+                      Enter the 6-digit verification code sent to +91 {otpPhone}.
+                    </p>
+                    <div>
+                      <label className="block text-xs font-semibold text-stone-700 mb-1">6-Digit OTP Code *</label>
+                      <input
+                        type="text"
+                        required
+                        maxLength={6}
+                        value={otpCode}
+                        onChange={(e) => setOtpCode(e.target.value)}
+                        placeholder="e.g. 123456"
+                        className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs tracking-widest text-center font-bold text-stone-800 focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { setOtpSent(false); setOtpCode(''); }}
+                        className="flex-1 py-2.5 border border-stone-300 text-stone-700 text-xs font-semibold rounded-xl hover:bg-stone-50"
+                      >
+                        Change Number
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={submitting}
+                        className="flex-1 py-2.5 bg-[#143728] text-white text-xs font-bold rounded-xl hover:bg-[#204e37] transition-all disabled:opacity-50 cursor-pointer"
+                      >
+                        {submitting ? 'Verifying...' : 'Verify OTP'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            ) : authMethod === 'email' ? (
+              /* EMAIL & PASSWORD AUTH FLOW */
+              <div className="space-y-3.5">
+                {showForgotPassword ? (
+                  <form onSubmit={handlePasswordRecovery} className="space-y-3">
+                    <p className="text-xs text-stone-500">
+                      Enter your email address to receive a secure password recovery link.
+                    </p>
+                    <div>
+                      <label className="block text-xs font-semibold text-stone-700 mb-1">Email Address *</label>
+                      <input
+                        type="email"
+                        required
+                        value={forgotPasswordEmail}
+                        onChange={(e) => setForgotPasswordEmail(e.target.value)}
+                        placeholder="name@example.com"
+                        className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                      />
+                    </div>
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setShowForgotPassword(false)}
+                        className="flex-1 py-2.5 border border-stone-300 text-stone-700 text-xs font-semibold rounded-xl hover:bg-stone-50"
+                      >
+                        Back to Login
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={submitting}
+                        className="flex-1 py-2.5 bg-[#143728] text-white text-xs font-bold rounded-xl hover:bg-[#204e37] transition-all disabled:opacity-50 cursor-pointer"
+                      >
+                        {submitting ? 'Sending...' : 'Send Recovery Link'}
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <form onSubmit={handleEmailAuthSubmit} className="space-y-3.5">
+                    {authMode === 'register' && (
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 mb-1">Full Name *</label>
+                        <input
+                          type="text"
+                          required
+                          value={regName}
+                          onChange={(e) => setRegName(e.target.value)}
+                          placeholder="Your Name"
+                          className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                        />
+                      </div>
+                    )}
+                    <div>
+                      <label className="block text-xs font-semibold text-stone-700 mb-1">Email Address *</label>
+                      <input
+                        type="email"
+                        required
+                        value={emailInput}
+                        onChange={(e) => setEmailInput(e.target.value)}
+                        placeholder="name@example.com"
+                        className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-semibold text-stone-700">Password *</label>
+                        {authMode === 'login' && (
+                          <button
+                            type="button"
+                            onClick={() => { setShowForgotPassword(true); setForgotPasswordEmail(emailInput); }}
+                            className="text-[11px] text-[#143728] hover:underline font-semibold"
+                          >
+                            Forgot Password?
+                          </button>
+                        )}
+                      </div>
+                      <input
+                        type="password"
+                        required
+                        minLength={6}
+                        value={emailPassword}
+                        onChange={(e) => setEmailPassword(e.target.value)}
+                        placeholder="At least 6 characters"
+                        className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={submitting}
+                      className="w-full py-2.5 bg-[#143728] text-white text-xs font-bold rounded-xl hover:bg-[#204e37] transition-all disabled:opacity-50 cursor-pointer"
+                    >
+                      {submitting ? 'Processing...' : authMode === 'login' ? 'Sign In with Email' : 'Register with Email'}
+                    </button>
+                  </form>
+                )}
+              </div>
+            ) : authMode === 'login' ? (
               <form onSubmit={handleLoginSubmit} className="space-y-4">
                 <p className="text-xs text-stone-500">
                   Log in to access your orders, track deliveries, and manage saved delivery addresses.

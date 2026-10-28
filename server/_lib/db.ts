@@ -1,7 +1,7 @@
 import { MongoClient, Db } from 'mongodb';
 import fs from 'fs';
 import path from 'path';
-import { Order, OrderStatus, CustomerAddress } from '../../src/types';
+import { Order, OrderStatus, CustomerAddress, Product } from '../../src/types';
 import { INITIAL_PRODUCTS } from '../../src/data/initialData';
 import { UserDocument, StoreState } from './types';
 import { WebhookOutboxRecord } from './webhook';
@@ -26,7 +26,13 @@ function getLocalFilePath(): string {
   return LOCAL_DATA_FILE;
 }
 
+let localStateCache: StoreState | null = null;
+
 function ensureLocalFile(): StoreState {
+  if (localStateCache) {
+    return localStateCache;
+  }
+
   const filePath = getLocalFilePath();
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
@@ -37,55 +43,62 @@ function ensureLocalFile(): StoreState {
     }
   }
 
+  const initialState: StoreState = {
+    orders: [],
+    users: [],
+    products: INITIAL_PRODUCTS,
+    webhookEvents: [],
+    lastUpdated: new Date().toISOString(),
+  };
+
   if (!fs.existsSync(filePath)) {
-    const initialState: StoreState = {
-      orders: [],
-      users: [],
-      products: INITIAL_PRODUCTS,
-      webhookEvents: [],
-      lastUpdated: new Date().toISOString(),
-    };
     try {
       fs.writeFileSync(filePath, JSON.stringify(initialState, null, 2), 'utf-8');
     } catch {
       // ignore
     }
-    return initialState;
+    localStateCache = initialState;
+    return localStateCache;
   }
 
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
+    if (!content || !content.trim()) {
+      fs.writeFileSync(filePath, JSON.stringify(initialState, null, 2), 'utf-8');
+      localStateCache = initialState;
+      return localStateCache;
+    }
     const parsed = JSON.parse(content);
     parsed.webhookEvents = parsed.webhookEvents || [];
-    return parsed;
+    parsed.orders = parsed.orders || [];
+    parsed.users = parsed.users || [];
+    parsed.products = parsed.products || INITIAL_PRODUCTS;
+    localStateCache = parsed;
+    return localStateCache;
   } catch {
-    return {
-      orders: [],
-      users: [],
-      products: INITIAL_PRODUCTS,
-      webhookEvents: [],
-      lastUpdated: new Date().toISOString(),
-    };
+    localStateCache = initialState;
+    return localStateCache;
   }
 }
 
-let fileWriteLock = Promise.resolve();
-
 async function saveLocalFile(state: StoreState): Promise<void> {
-  fileWriteLock = fileWriteLock.then(async () => {
-    state.lastUpdated = new Date().toISOString();
-    const filePath = getLocalFilePath();
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) {
-      try {
-        fs.mkdirSync(dir, { recursive: true });
-      } catch {
-        // ignore
-      }
+  localStateCache = state;
+  state.lastUpdated = new Date().toISOString();
+  const filePath = getLocalFilePath();
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch {
+      // ignore
     }
-    await fs.promises.writeFile(filePath, JSON.stringify(state, null, 2), 'utf-8');
-  });
-  return fileWriteLock;
+  }
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(state, null, 2), 'utf-8');
+  } catch {
+    // ignore
+  }
+  return Promise.resolve();
 }
 
 /**
@@ -123,10 +136,25 @@ async function getMongoDb(): Promise<Db | null> {
       // Ensure indexes in background
       cachedDb.collection('orders').createIndex({ orderNumber: 1 }, { unique: true }).catch(() => {});
       cachedDb.collection('orders').createIndex({ 'customer.phone': 1 }).catch(() => {});
+      cachedDb.collection('orders').createIndex({ customerId: 1 }).catch(() => {});
       cachedDb.collection('orders').createIndex({ createdAt: -1 }).catch(() => {});
-      cachedDb.collection('users').createIndex({ phone: 1 }, { unique: true }).catch(() => {});
+      cachedDb.collection('users').createIndex({ phone: 1 }).catch(() => {});
+      cachedDb.collection('users').createIndex({ email: 1 }).catch(() => {});
+      cachedDb.collection('users').createIndex({ firebaseUid: 1 }).catch(() => {});
+      cachedDb.collection('products').createIndex({ id: 1 }, { unique: true }).catch(() => {});
       cachedDb.collection('webhook_outbox').createIndex({ eventId: 1 }, { unique: true }).catch(() => {});
       cachedDb.collection('webhook_outbox').createIndex({ status: 1 }).catch(() => {});
+
+      // Auto-seed products collection if empty
+      cachedDb.collection('products').countDocuments().then(async (count) => {
+        if (count === 0 && cachedDb) {
+          try {
+            await cachedDb.collection('products').insertMany(INITIAL_PRODUCTS as any);
+          } catch {
+            // ignore
+          }
+        }
+      }).catch(() => {});
 
       return cachedDb;
     } catch (err) {
@@ -228,11 +256,14 @@ export const serverDb = {
     const newOrder: Order = {
       id: orderId,
       orderNumber,
+      customerId: orderData.customerId,
       customer: orderData.customer,
+      addressSnapshot: orderData.addressSnapshot,
       items: orderData.items,
       subtotal: orderData.subtotal || 0,
       deliveryCharge: orderData.deliveryCharge || 0,
       discountAmount: orderData.discountAmount || 0,
+      couponCode: orderData.couponCode,
       totalAmount: orderData.totalAmount,
       paymentMethod: orderData.paymentMethod || 'COD',
       paymentStatus: orderData.paymentStatus || 'Pending',
@@ -244,6 +275,8 @@ export const serverDb = {
           note: 'Order placed by customer via online store',
         },
       ],
+      whatsappStatus: orderData.whatsappStatus || 'pending',
+      excelSyncStatus: orderData.excelSyncStatus || 'pending',
       notes: orderData.notes || '',
       createdAt: now,
       updatedAt: now,
@@ -258,13 +291,50 @@ export const serverDb = {
 
     if (db) {
       await db.collection('orders').insertOne(newOrder as any);
+      // Decrement stock in background
+      this.decrementProductStock(orderData.items).catch(() => {});
       return newOrder;
     }
 
     const state = ensureLocalFile();
     state.orders.unshift(newOrder);
     await saveLocalFile(state);
+    this.decrementProductStock(orderData.items).catch(() => {});
     return newOrder;
+  },
+
+  async updateOrderSyncStatuses(
+    orderId: string,
+    updates: {
+      whatsappStatus?: 'pending' | 'sent' | 'failed' | 'not_configured';
+      whatsappSentAt?: string;
+      whatsappError?: string;
+      excelSyncStatus?: 'pending' | 'synced' | 'failed' | 'not_configured';
+      excelSyncAt?: string;
+      excelError?: string;
+    }
+  ): Promise<Order | null> {
+    const now = new Date().toISOString();
+    let db = await getMongoDb();
+    if (db) {
+      await db.collection('orders').updateOne(
+        { $or: [{ id: orderId }, { orderNumber: orderId }] },
+        { $set: { ...updates, updatedAt: now } }
+      );
+      const updated = await db.collection('orders').findOne({
+        $or: [{ id: orderId }, { orderNumber: orderId }],
+      });
+      if (!updated) return null;
+      const { _id, ...rest } = updated as any;
+      return rest as Order;
+    }
+
+    const state = ensureLocalFile();
+    const index = state.orders.findIndex((o) => o.id === orderId || o.orderNumber === orderId);
+    if (index === -1) return null;
+    state.orders[index] = { ...state.orders[index], ...updates, updatedAt: now };
+    await saveLocalFile(state);
+    return state.orders[index];
   },
 
   async updateOrderStatus(
@@ -306,8 +376,8 @@ export const serverDb = {
             paymentStatus: status === 'Delivered' && existing.paymentMethod === 'COD' ? 'Paid' : existing.paymentStatus,
             updatedAt: now,
           },
-          $push: { statusHistory: newHistoryItem as any },
-        }
+          $push: { statusHistory: newHistoryItem } as any,
+        } as any
       );
 
       const updated = await db.collection('orders').findOne({ _id: existing._id });
@@ -355,6 +425,140 @@ export const serverDb = {
     const state = ensureLocalFile();
     const user = state.users.find((u) => u.phone.replace(/\D/g, '') === cleanPhone);
     return user || null;
+  },
+
+  async getUserByEmail(email: string): Promise<UserDocument | null> {
+    if (!email) return null;
+    const cleanEmail = email.trim().toLowerCase();
+    const db = await getMongoDb();
+    if (db) {
+      const doc = await db.collection('users').findOne({ email: cleanEmail });
+      if (!doc) return null;
+      const { _id, ...rest } = doc;
+      return rest as UserDocument;
+    }
+    const state = ensureLocalFile();
+    const user = state.users.find((u) => u.email && u.email.toLowerCase() === cleanEmail);
+    return user || null;
+  },
+
+  async getUserByFirebaseUid(uid: string): Promise<UserDocument | null> {
+    if (!uid) return null;
+    const db = await getMongoDb();
+    if (db) {
+      const doc = await db.collection('users').findOne({ firebaseUid: uid });
+      if (!doc) return null;
+      const { _id, ...rest } = doc;
+      return rest as UserDocument;
+    }
+    const state = ensureLocalFile();
+    const user = state.users.find((u) => u.firebaseUid === uid);
+    return user || null;
+  },
+
+  async upsertFirebaseUser(data: {
+    firebaseUid: string;
+    email?: string;
+    phone?: string;
+    fullName: string;
+    authProvider: 'google' | 'phone' | 'email';
+    emailVerified?: boolean;
+    phoneVerified?: boolean;
+    initialAddress?: Partial<CustomerAddress>;
+  }): Promise<UserDocument> {
+    const now = new Date().toISOString();
+    const cleanEmail = data.email ? data.email.trim().toLowerCase() : undefined;
+    const cleanPhone = data.phone ? data.phone.replace(/\D/g, '').slice(-10) : '';
+
+    // Check if user already exists by firebaseUid, email, or phone
+    let existing: UserDocument | null = await this.getUserByFirebaseUid(data.firebaseUid);
+    if (!existing && cleanEmail) {
+      existing = await this.getUserByEmail(cleanEmail);
+    }
+    if (!existing && cleanPhone) {
+      existing = await this.getUserByPhone(cleanPhone);
+    }
+
+    if (existing) {
+      // Update existing user with verified credentials
+      const updates: Partial<UserDocument> = {
+        firebaseUid: data.firebaseUid,
+        authProvider: data.authProvider,
+        updatedAt: now,
+      };
+      if (data.emailVerified !== undefined) updates.emailVerified = data.emailVerified;
+      if (data.phoneVerified !== undefined) updates.phoneVerified = data.phoneVerified;
+      if (cleanEmail && !existing.email) updates.email = cleanEmail;
+      if (cleanPhone && !existing.phone) updates.phone = cleanPhone;
+      if (data.fullName && (!existing.fullName || existing.fullName === 'Guest Customer')) {
+        updates.fullName = data.fullName.trim();
+      }
+
+      const db = await getMongoDb();
+      if (db) {
+        await db.collection('users').updateOne(
+          { id: existing.id },
+          { $set: updates }
+        );
+        const updated = await this.getUserById(existing.id);
+        return updated || { ...existing, ...updates };
+      }
+
+      const state = ensureLocalFile();
+      const idx = state.users.findIndex((u) => u.id === existing!.id);
+      if (idx >= 0) {
+        state.users[idx] = { ...state.users[idx], ...updates };
+        await saveLocalFile(state);
+        return state.users[idx];
+      }
+      return { ...existing, ...updates };
+    }
+
+    // Create new customer record
+    const userId = `usr-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+    const addresses: CustomerAddress[] = [];
+    if (data.initialAddress && data.initialAddress.addressLine) {
+      addresses.push({
+        id: `addr-${Date.now()}-1`,
+        label: data.initialAddress.label || 'Home',
+        recipientName: data.initialAddress.recipientName || data.fullName,
+        phone: data.initialAddress.phone || cleanPhone,
+        addressLine: data.initialAddress.addressLine,
+        landmark: data.initialAddress.landmark || '',
+        villageTown: data.initialAddress.villageTown || '',
+        district: data.initialAddress.district || '',
+        state: data.initialAddress.state || 'Tamil Nadu',
+        pincode: data.initialAddress.pincode || '',
+        isDefault: true,
+        coordinates: data.initialAddress.coordinates,
+        createdAt: now,
+      });
+    }
+
+    const newUser: UserDocument = {
+      id: userId,
+      fullName: data.fullName.trim() || 'Valued Customer',
+      phone: cleanPhone,
+      email: cleanEmail || '',
+      firebaseUid: data.firebaseUid,
+      authProvider: data.authProvider,
+      emailVerified: Boolean(data.emailVerified),
+      phoneVerified: Boolean(data.phoneVerified),
+      addresses,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection('users').insertOne(newUser as any);
+      return newUser;
+    }
+
+    const state = ensureLocalFile();
+    state.users.push(newUser);
+    await saveLocalFile(state);
+    return newUser;
   },
 
   async getUserById(id: string): Promise<UserDocument | null> {
@@ -630,5 +834,108 @@ export const serverDb = {
       failed: list.filter((r) => r.status === 'failed').length,
       webhookUrlConfigured,
     };
+  },
+
+  // ===================== PRODUCTS =====================
+
+  async getAllProducts(): Promise<Product[]> {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection('products').find({}).toArray();
+      if (docs.length > 0) {
+        return docs.map((d: any) => {
+          const { _id, ...rest } = d;
+          return rest as Product;
+        });
+      }
+      // Seed if empty
+      await db.collection('products').insertMany(INITIAL_PRODUCTS as any).catch(() => {});
+      return INITIAL_PRODUCTS;
+    }
+
+    const state = ensureLocalFile();
+    if (!state.products || state.products.length === 0) {
+      state.products = INITIAL_PRODUCTS;
+      await saveLocalFile(state);
+    }
+    return state.products;
+  },
+
+  async getProductById(id: string): Promise<Product | null> {
+    const products = await this.getAllProducts();
+    return products.find((p) => p.id === id || p.slug === id) || null;
+  },
+
+  async saveProduct(product: Product): Promise<Product> {
+    const now = new Date().toISOString();
+    const updatedProduct = { ...product, updatedAt: now };
+
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection('products').updateOne(
+        { id: product.id },
+        { $set: updatedProduct },
+        { upsert: true }
+      );
+      return updatedProduct;
+    }
+
+    const state = ensureLocalFile();
+    state.products = state.products || [];
+    const idx = state.products.findIndex((p) => p.id === product.id);
+    if (idx >= 0) {
+      state.products[idx] = updatedProduct;
+    } else {
+      state.products.push(updatedProduct);
+    }
+    await saveLocalFile(state);
+    return updatedProduct;
+  },
+
+  async deleteProduct(id: string): Promise<boolean> {
+    const db = await getMongoDb();
+    if (db) {
+      const res = await db.collection('products').deleteOne({ id });
+      return res.deletedCount > 0;
+    }
+
+    const state = ensureLocalFile();
+    if (!state.products) return false;
+    const initialLen = state.products.length;
+    state.products = state.products.filter((p) => p.id !== id);
+    if (state.products.length !== initialLen) {
+      await saveLocalFile(state);
+      return true;
+    }
+    return false;
+  },
+
+  async decrementProductStock(items: any[]): Promise<void> {
+    if (!items || !items.length) return;
+    const db = await getMongoDb();
+
+    if (db) {
+      for (const item of items) {
+        if (!item.productId || !item.variantId) continue;
+        await db.collection('products').updateOne(
+          { id: item.productId, 'variants.id': item.variantId },
+          { $inc: { 'variants.$.stock': -(item.quantity || 1) } }
+        ).catch(() => {});
+      }
+      return;
+    }
+
+    const state = ensureLocalFile();
+    if (!state.products) return;
+    for (const item of items) {
+      const prod = state.products.find((p) => p.id === item.productId);
+      if (prod && prod.variants) {
+        const variant = prod.variants.find((v) => v.id === item.variantId);
+        if (variant) {
+          variant.stock = Math.max(0, variant.stock - (item.quantity || 1));
+        }
+      }
+    }
+    await saveLocalFile(state);
   },
 };

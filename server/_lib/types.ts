@@ -2,7 +2,7 @@ import { Order, CustomerUser, Product } from '../../src/types';
 import { WebhookOutboxRecord } from './webhook';
 
 export interface UserDocument extends CustomerUser {
-  passwordHash: string;
+  passwordHash?: string;
 }
 
 export interface StoreState {

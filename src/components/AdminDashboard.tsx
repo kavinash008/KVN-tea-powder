@@ -47,6 +47,8 @@ import {
   Eye,
   Loader2,
   AlertCircle,
+  FileSpreadsheet,
+  MessageCircle,
 } from 'lucide-react';
 
 interface AdminDashboardProps {
@@ -124,6 +126,41 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
       console.warn('Webhook status check notice:', err);
     }
   }, []);
+
+  const [syncingExcel, setSyncingExcel] = useState(false);
+  const [retryingWaOrderId, setRetryingWaOrderId] = useState<string | null>(null);
+
+  const handleSyncExcel = async () => {
+    try {
+      setSyncingExcel(true);
+      const token = localStorage.getItem('kvn_admin_token') || 'kvn2026';
+      const res = await api.adminSyncExcel(token);
+      showAdminToast(res?.message || 'Excel sync executed');
+      await loadServerOrders();
+    } catch (err: any) {
+      showAdminToast(err?.message || 'Failed to sync with Microsoft Excel');
+    } finally {
+      setSyncingExcel(false);
+    }
+  };
+
+  const handleRetryWhatsApp = async (orderId: string) => {
+    try {
+      setRetryingWaOrderId(orderId);
+      const token = localStorage.getItem('kvn_admin_token') || 'kvn2026';
+      const res = await api.adminRetryWhatsApp(token, orderId);
+      if (res.success) {
+        showAdminToast('WhatsApp confirmation message dispatched!');
+      } else {
+        showAdminToast(res.result?.error || 'WhatsApp message failed');
+      }
+      await loadServerOrders();
+    } catch (err: any) {
+      showAdminToast(err.message || 'WhatsApp retry failed');
+    } finally {
+      setRetryingWaOrderId(null);
+    }
+  };
 
   const handleRetryWebhooks = async () => {
     try {
@@ -676,6 +713,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                   )}
 
                   <button
+                    onClick={handleSyncExcel}
+                    disabled={syncingExcel}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-300 rounded-xl text-xs font-semibold transition-all shadow-2xs cursor-pointer"
+                    title="Sync all orders to Microsoft Excel workbook via Microsoft Graph API"
+                  >
+                    <FileSpreadsheet className={`w-3.5 h-3.5 text-teal-700 ${syncingExcel ? 'animate-spin' : ''}`} />
+                    <span>{syncingExcel ? 'Syncing Excel...' : 'Sync to Excel'}</span>
+                  </button>
+
+                  <button
                     onClick={() => loadServerOrders()}
                     disabled={isSyncingOrders}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-stone-100 hover:bg-stone-200 border border-stone-300 rounded-xl text-xs font-semibold text-stone-700 transition-all shadow-2xs cursor-pointer"
@@ -789,9 +836,45 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                               </span>
                             </td>
                             <td className="p-3.5 whitespace-nowrap">
-                              <span className="font-medium bg-stone-100 text-stone-800 px-2 py-0.5 rounded text-[10px] border border-stone-200">
+                              <span className="font-medium bg-stone-100 text-stone-800 px-2 py-0.5 rounded text-[10px] border border-stone-200 block w-max">
                                 {ord.orderStatus}
                               </span>
+                              <div className="flex flex-col gap-1 mt-1.5 text-[9px]">
+                                <div className="flex items-center gap-1">
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded font-semibold ${
+                                      ord.whatsappStatus === 'sent'
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : ord.whatsappStatus === 'failed'
+                                        ? 'bg-rose-100 text-rose-800'
+                                        : 'bg-stone-100 text-stone-600'
+                                    }`}
+                                  >
+                                    WA: {ord.whatsappStatus || 'pending'}
+                                  </span>
+                                  {ord.whatsappStatus === 'failed' && (
+                                    <button
+                                      onClick={() => handleRetryWhatsApp(ord.id)}
+                                      disabled={retryingWaOrderId === ord.id}
+                                      className="text-[9px] text-[#143728] hover:underline font-bold"
+                                      title="Retry sending WhatsApp message"
+                                    >
+                                      {retryingWaOrderId === ord.id ? '...' : 'Retry'}
+                                    </button>
+                                  )}
+                                </div>
+                                <span
+                                  className={`px-1.5 py-0.5 rounded font-semibold w-max ${
+                                    ord.excelSyncStatus === 'synced'
+                                      ? 'bg-teal-100 text-teal-800'
+                                      : ord.excelSyncStatus === 'failed'
+                                      ? 'bg-rose-100 text-rose-800'
+                                      : 'bg-stone-100 text-stone-600'
+                                  }`}
+                                >
+                                  Excel: {ord.excelSyncStatus || 'pending'}
+                                </span>
+                              </div>
                             </td>
                             <td className="p-3.5 whitespace-nowrap">
                               <select

@@ -10,8 +10,10 @@ import {
   verifyAdminToken,
 } from './_lib/auth';
 import { validatePhone, validateAddress, validateAndPriceOrder, validatePincode } from './_lib/validation';
-import { OrderStatus } from '../src/types';
+import { OrderStatus, CustomerAddress } from '../src/types';
 import { webhookService, buildOrderCreatedPayload, buildStatusChangedPayload } from './_lib/webhook';
+import { whatsappService } from './_lib/whatsapp';
+import { excelSyncService } from './_lib/excelSync';
 
 const app = express();
 
@@ -28,6 +30,29 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   }
   next();
 });
+
+// In-memory sliding rate limiter for sensitive endpoints
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+function rateLimiter(limit: number, windowMs: number) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const ip = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+    const key = `${ip}:${req.path}`;
+    const now = Date.now();
+    const entry = rateLimitMap.get(key as string);
+
+    if (!entry || now > entry.resetAt) {
+      rateLimitMap.set(key as string, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    if (entry.count >= limit) {
+      return res.status(429).json({ error: 'Too many requests. Please wait a moment and try again.' });
+    }
+
+    entry.count++;
+    next();
+  };
+}
 
 // Middleware: Customer Authentication
 function authenticateCustomer(req: Request, res: Response, next: NextFunction) {
@@ -91,8 +116,56 @@ router.get(['/', '/health'], async (_req: Request, res: Response) => {
 // 2. CUSTOMER AUTHENTICATION
 // ==========================================
 
+// Synchronize Firebase Customer Authentication (Google, Phone OTP, Email/Password)
+router.post('/auth/firebase-sync', rateLimiter(20, 60000), async (req: Request, res: Response) => {
+  try {
+    const { uid, email, phone, fullName, authProvider, emailVerified, phoneVerified, initialAddress } = req.body;
+
+    if (!uid) {
+      return res.status(400).json({ error: 'Firebase UID is required' });
+    }
+
+    const adminEmails = ['krishnamoorthykavinash@gmail.com', 'admin@kvnteapowder.com'];
+    const adminPhones = ['9787513911', '6383050287'];
+
+    const cleanEmail = email ? email.trim().toLowerCase() : '';
+    const cleanPhone = phone ? phone.replace(/\D/g, '').slice(-10) : '';
+
+    const isAdmin = adminEmails.includes(cleanEmail) || adminPhones.includes(cleanPhone);
+    const role = isAdmin ? 'admin' : 'customer';
+
+    const user = await serverDb.upsertFirebaseUser({
+      firebaseUid: uid,
+      email: cleanEmail,
+      phone: cleanPhone,
+      fullName: fullName || 'Valued Customer',
+      authProvider: authProvider || 'email',
+      emailVerified: Boolean(emailVerified),
+      phoneVerified: Boolean(phoneVerified),
+      initialAddress,
+    });
+
+    const token = createToken({
+      userId: user.id,
+      phone: user.phone || '0000000000',
+      role,
+    });
+
+    const { passwordHash: _, ...safeUser } = user;
+    return res.json({
+      message: 'Authentication synchronized successfully',
+      user: { ...safeUser, role },
+      token,
+      isAdmin,
+    });
+  } catch (err: any) {
+    console.error('Firebase sync error:', err);
+    return res.status(500).json({ error: 'Failed to synchronize authentication' });
+  }
+});
+
 // Register a new customer
-router.post('/auth/register', async (req: Request, res: Response) => {
+router.post('/auth/register', rateLimiter(10, 60000), async (req: Request, res: Response) => {
   try {
     const { fullName, phone, password, email, initialAddress } = req.body;
 
@@ -296,9 +369,9 @@ router.delete('/auth/addresses/:id', authenticateCustomer, async (req: Request, 
 // ==========================================
 
 // Place Order
-router.post('/orders', async (req: Request, res: Response) => {
+router.post('/orders', rateLimiter(15, 60000), async (req: Request, res: Response) => {
   try {
-    const { customer, items, paymentMethod, notes } = req.body;
+    const { customer, items, paymentMethod, notes, addressId } = req.body;
 
     if (!customer) {
       return res.status(400).json({ error: 'Customer and delivery details are required' });
@@ -331,9 +404,35 @@ router.post('/orders', async (req: Request, res: Response) => {
       pincode: customer.pincode.trim(),
     };
 
+    let customerId = 'GUEST';
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const payload = verifyToken(authHeader.slice(7));
+      if (payload && payload.userId) {
+        customerId = payload.userId;
+      }
+    }
+
+    const addressSnapshot: CustomerAddress = {
+      id: addressId || `snap-${Date.now()}`,
+      label: (customer.label as any) || 'Home',
+      recipientName: cleanCustomer.fullName,
+      phone: cleanCustomer.phone,
+      addressLine: cleanCustomer.address,
+      landmark: cleanCustomer.landmark || '',
+      villageTown: cleanCustomer.villageTown,
+      district: cleanCustomer.district || '',
+      state: cleanCustomer.state || 'Tamil Nadu',
+      pincode: cleanCustomer.pincode,
+      coordinates: cleanCustomer.coordinates,
+      createdAt: new Date().toISOString(),
+    };
+
     const isOnlinePayment = paymentMethod === 'Online' || paymentMethod === 'ONLINE_UPI';
     const order = await serverDb.createOrder({
+      customerId,
       customer: cleanCustomer,
+      addressSnapshot,
       items: pricing.validatedItems,
       subtotal: pricing.subtotal,
       deliveryCharge: pricing.deliveryCharge,
@@ -342,16 +441,17 @@ router.post('/orders', async (req: Request, res: Response) => {
       paymentMethod: isOnlinePayment ? 'ONLINE_UPI' : 'COD',
       paymentStatus: isOnlinePayment ? 'Paid' : 'Pending',
       orderStatus: 'Order Confirmed',
+      whatsappStatus: whatsappService.isConfigured() ? 'pending' : 'not_configured',
+      excelSyncStatus: excelSyncService.isConfigured() ? 'pending' : 'not_configured',
       notes: notes?.trim() || '',
     });
 
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const payload = verifyToken(authHeader.slice(7));
-      if (payload && payload.userId) {
-        const addresses = await serverDb.getUserAddresses(payload.userId);
+    // Auto-save address to customer profile if first purchase and authenticated
+    if (customerId !== 'GUEST') {
+      try {
+        const addresses = await serverDb.getUserAddresses(customerId);
         if (addresses.length === 0) {
-          await serverDb.addAddress(payload.userId, {
+          await serverDb.addAddress(customerId, {
             label: 'Home',
             recipientName: cleanCustomer.fullName,
             phone: cleanCustomer.phone,
@@ -365,16 +465,54 @@ router.post('/orders', async (req: Request, res: Response) => {
             coordinates: cleanCustomer.coordinates,
           });
         }
+      } catch {
+        // non-fatal
       }
     }
 
-    // Queue and dispatch n8n backup webhook asynchronously (does not block or fail user order)
+    // 1. Dispatch n8n backup webhook asynchronously
     try {
       webhookService.queueAndDispatch(buildOrderCreatedPayload(order)).catch((err) => {
         console.warn('Webhook queue notice:', err);
       });
     } catch (err) {
       console.warn('Non-fatal webhook queue error:', err);
+    }
+
+    // 2. Dispatch official WhatsApp Business Cloud API confirmation asynchronously
+    try {
+      whatsappService.sendOrderConfirmation(order).then((waRes) => {
+        serverDb.updateOrderSyncStatuses(order.id, {
+          whatsappStatus: waRes.status,
+          whatsappSentAt: waRes.sentAt,
+          whatsappError: waRes.error,
+        }).catch(() => {});
+      }).catch((err) => {
+        serverDb.updateOrderSyncStatuses(order.id, {
+          whatsappStatus: 'failed',
+          whatsappError: err.message,
+        }).catch(() => {});
+      });
+    } catch (err) {
+      console.warn('Non-fatal WhatsApp dispatch notice:', err);
+    }
+
+    // 3. Dispatch Microsoft Graph Excel sync asynchronously
+    try {
+      excelSyncService.syncOrderToExcel(order).then((xlRes) => {
+        serverDb.updateOrderSyncStatuses(order.id, {
+          excelSyncStatus: xlRes.status,
+          excelSyncAt: xlRes.syncedAt,
+          excelError: xlRes.error,
+        }).catch(() => {});
+      }).catch((err) => {
+        serverDb.updateOrderSyncStatuses(order.id, {
+          excelSyncStatus: 'failed',
+          excelError: err.message,
+        }).catch(() => {});
+      });
+    } catch (err) {
+      console.warn('Non-fatal Excel sync notice:', err);
     }
 
     return res.status(201).json({
@@ -552,6 +690,136 @@ router.get('/admin/stats', authenticateAdmin, async (_req: Request, res: Respons
     });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to compute admin stats' });
+  }
+});
+
+// ==========================================
+// 5. PRODUCT CATALOG ENDPOINTS
+// ==========================================
+
+// Get All Products (Public)
+router.get('/products', async (_req: Request, res: Response) => {
+  try {
+    const products = await serverDb.getAllProducts();
+    return res.json({ products });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to load products' });
+  }
+});
+
+// Get Single Product
+router.get('/products/:id', async (req: Request, res: Response) => {
+  try {
+    const product = await serverDb.getProductById(req.params.id);
+    if (!product) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    return res.json({ product });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to load product' });
+  }
+});
+
+// Admin: Save or Update Product
+router.post('/admin/products', authenticateAdmin, async (req: Request, res: Response) => {
+  try {
+    const productData = req.body;
+    if (!productData.name || !productData.id) {
+      return res.status(400).json({ error: 'Product ID and Name are required' });
+    }
+    const saved = await serverDb.saveProduct(productData);
+    return res.status(201).json({ success: true, product: saved });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to save product' });
+  }
+});
+
+// Admin: Delete Product
+router.delete('/admin/products/:id', authenticateAdmin, async (req: Request, res: Response) => {
+  try {
+    const success = await serverDb.deleteProduct(req.params.id);
+    if (!success) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    return res.json({ success: true, message: 'Product deleted' });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to delete product' });
+  }
+});
+
+// ==========================================
+// 6. WHATSAPP & MICROSOFT EXCEL SYNC ENDPOINTS
+// ==========================================
+
+// Admin: WhatsApp Cloud API Status
+router.get('/admin/whatsapp/status', authenticateAdmin, async (_req: Request, res: Response) => {
+  return res.json({
+    configured: whatsappService.isConfigured(),
+    phoneNumberIdConfigured: Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID),
+    accessTokenConfigured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
+    templateConfigured: Boolean(process.env.WHATSAPP_TEMPLATE_NAME),
+  });
+});
+
+// Admin: Microsoft Graph Excel Sync Status
+router.get('/admin/excel/status', authenticateAdmin, async (_req: Request, res: Response) => {
+  const status = excelSyncService.getConfigurationStatus();
+  return res.json(status);
+});
+
+// Admin: Trigger Manual Excel Sync for Orders
+router.post('/admin/excel/sync', authenticateAdmin, async (_req: Request, res: Response) => {
+  try {
+    if (!excelSyncService.isConfigured()) {
+      return res.status(400).json({
+        error: 'Microsoft Graph Excel credentials not configured. Please set MS_GRAPH_CLIENT_ID, MS_GRAPH_CLIENT_SECRET, MS_GRAPH_TENANT_ID, MS_EXCEL_DRIVE_ID, and MS_EXCEL_FILE_ID.',
+      });
+    }
+
+    const orders = await serverDb.getAllOrders();
+    const unsynced = orders.filter((o) => o.excelSyncStatus !== 'synced');
+    let syncedCount = 0;
+    let failedCount = 0;
+
+    for (const order of unsynced) {
+      const result = await excelSyncService.syncOrderToExcel(order);
+      await serverDb.updateOrderSyncStatuses(order.id, {
+        excelSyncStatus: result.status,
+        excelSyncAt: result.syncedAt,
+        excelError: result.error,
+      });
+      if (result.success) syncedCount++;
+      else failedCount++;
+    }
+
+    return res.json({
+      success: true,
+      message: `Excel sync completed: ${syncedCount} synced, ${failedCount} failed`,
+      syncedCount,
+      failedCount,
+      totalProcessed: unsynced.length,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to execute Excel sync: ' + err.message });
+  }
+});
+
+// Admin: Retry WhatsApp Confirmation for an Order
+router.post('/admin/whatsapp/retry/:orderId', authenticateAdmin, async (req: Request, res: Response) => {
+  try {
+    const order = await serverDb.getOrderById(req.params.orderId);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    const result = await whatsappService.sendOrderConfirmation(order);
+    await serverDb.updateOrderSyncStatuses(order.id, {
+      whatsappStatus: result.status,
+      whatsappSentAt: result.sentAt,
+      whatsappError: result.error,
+    });
+    return res.json({ success: result.success, result });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to send WhatsApp message: ' + err.message });
   }
 });
 

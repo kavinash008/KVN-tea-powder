@@ -2,8 +2,26 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 import { Product, CartItem, BusinessConfig, CustomerUser, CustomerAddress } from '../types';
 import { db } from '../lib/db';
 import { api } from '../lib/api';
+import { INITIAL_PRODUCTS } from '../data/initialData';
+import {
+  auth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
+  sendEmailVerification,
+  signOut,
+  RecaptchaVerifier,
+  signInWithPhoneNumber,
+  isFirebaseConfigured,
+} from '../lib/firebase';
 
 interface ShopContextType {
+  // Products
+  products: Product[];
+  refreshProducts: () => Promise<void>;
+
   // Cart
   cart: CartItem[];
   addToCart: (product: Product, variantId?: string, quantity?: number) => void;
@@ -30,6 +48,7 @@ interface ShopContextType {
   currentUser: CustomerUser | null;
   authToken: string | null;
   savedAddresses: CustomerAddress[];
+  isFirebaseAvailable: boolean;
   loginCustomer: (phone: string, password: string) => Promise<{ success: boolean; error?: string }>;
   registerCustomer: (data: {
     fullName: string;
@@ -38,6 +57,12 @@ interface ShopContextType {
     email?: string;
     initialAddress?: Partial<CustomerAddress>;
   }) => Promise<{ success: boolean; error?: string }>;
+  loginWithGoogle: () => Promise<{ success: boolean; error?: string }>;
+  loginWithEmail: (email: string, pass: string) => Promise<{ success: boolean; error?: string }>;
+  registerWithEmail: (email: string, pass: string, fullName: string, phone?: string) => Promise<{ success: boolean; error?: string }>;
+  sendPasswordReset: (email: string) => Promise<{ success: boolean; error?: string }>;
+  sendPhoneOtp: (phone: string, containerId: string) => Promise<{ success: boolean; confirmationResult?: any; error?: string }>;
+  verifyPhoneOtp: (confirmationResult: any, code: string, fullName?: string) => Promise<{ success: boolean; error?: string }>;
   logoutCustomer: () => void;
   refreshUserProfile: () => Promise<void>;
   addSavedAddress: (address: Omit<CustomerAddress, 'id'>) => Promise<CustomerAddress | null>;
@@ -53,6 +78,15 @@ interface ShopContextType {
 export const ShopContext = createContext<ShopContextType | undefined>(undefined);
 
 export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [products, setProducts] = useState<Product[]>(() => {
+    try {
+      const local = db.getProducts();
+      return local && local.length > 0 ? local : INITIAL_PRODUCTS;
+    } catch {
+      return INITIAL_PRODUCTS;
+    }
+  });
+
   const [cart, setCart] = useState<CartItem[]>(() => db.getCart());
   const [wishlist, setWishlist] = useState<string[]>(() => db.getWishlist());
   const [searchQuery, setSearchQuery] = useState('');
@@ -80,6 +114,24 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [savedAddresses, setSavedAddresses] = useState<CustomerAddress[]>(() => {
     return currentUser?.addresses || [];
   });
+
+  const isFirebaseAvailable = isFirebaseConfigured();
+
+  // Load live products from backend
+  const refreshProducts = useCallback(async () => {
+    try {
+      const serverProducts = await api.getProducts();
+      if (serverProducts && serverProducts.length > 0) {
+        setProducts(serverProducts);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshProducts();
+  }, [refreshProducts]);
 
   // Sync cart to local storage
   useEffect(() => {
@@ -182,7 +234,175 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const loginWithGoogle = async (): Promise<{ success: boolean; error?: string }> => {
+    try {
+      if (!auth) throw new Error('Firebase Auth is not initialized');
+      const provider = new GoogleAuthProvider();
+      const result = await signInWithPopup(auth, provider);
+      const fbUser = result.user;
+
+      const { user, token } = await api.syncFirebaseAuth({
+        uid: fbUser.uid,
+        email: fbUser.email || undefined,
+        phone: fbUser.phoneNumber || undefined,
+        fullName: fbUser.displayName || 'Valued Customer',
+        authProvider: 'google',
+        emailVerified: fbUser.emailVerified,
+        phoneVerified: Boolean(fbUser.phoneNumber),
+      });
+
+      setAuthToken(token);
+      setCurrentUser(user);
+      setSavedAddresses(user.addresses || []);
+      try {
+        localStorage.setItem('kvn_customer_token', token);
+        localStorage.setItem('kvn_customer_user', JSON.stringify(user));
+      } catch {}
+      showToast(`Welcome, ${user.fullName}!`);
+      return { success: true };
+    } catch (err: any) {
+      console.error('Google Sign-In error:', err);
+      return { success: false, error: err.message || 'Google Sign-In failed' };
+    }
+  };
+
+  const loginWithEmail = async (email: string, pass: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      if (!auth) throw new Error('Firebase Auth is not initialized');
+      const result = await signInWithEmailAndPassword(auth, email.trim(), pass);
+      const fbUser = result.user;
+
+      const { user, token } = await api.syncFirebaseAuth({
+        uid: fbUser.uid,
+        email: fbUser.email || email.trim(),
+        fullName: fbUser.displayName || 'Valued Customer',
+        authProvider: 'email',
+        emailVerified: fbUser.emailVerified,
+      });
+
+      setAuthToken(token);
+      setCurrentUser(user);
+      setSavedAddresses(user.addresses || []);
+      try {
+        localStorage.setItem('kvn_customer_token', token);
+        localStorage.setItem('kvn_customer_user', JSON.stringify(user));
+      } catch {}
+      showToast(`Welcome back, ${user.fullName}!`);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Email sign-in failed' };
+    }
+  };
+
+  const registerWithEmail = async (
+    email: string,
+    pass: string,
+    fullName: string,
+    phone?: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      if (!auth) throw new Error('Firebase Auth is not initialized');
+      const result = await createUserWithEmailAndPassword(auth, email.trim(), pass);
+      const fbUser = result.user;
+
+      try {
+        await sendEmailVerification(fbUser);
+      } catch (e) {
+        console.warn('Could not send verification email:', e);
+      }
+
+      const { user, token } = await api.syncFirebaseAuth({
+        uid: fbUser.uid,
+        email: email.trim(),
+        phone: phone ? phone.replace(/\D/g, '').slice(-10) : undefined,
+        fullName: fullName.trim(),
+        authProvider: 'email',
+        emailVerified: false,
+      });
+
+      setAuthToken(token);
+      setCurrentUser(user);
+      setSavedAddresses(user.addresses || []);
+      try {
+        localStorage.setItem('kvn_customer_token', token);
+        localStorage.setItem('kvn_customer_user', JSON.stringify(user));
+      } catch {}
+      showToast(`Account created! A verification email was sent to ${email}`);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Registration failed' };
+    }
+  };
+
+  const sendPasswordReset = async (email: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      if (!auth) throw new Error('Firebase Auth is not initialized');
+      await sendPasswordResetEmail(auth, email.trim());
+      showToast(`Password recovery link sent to ${email}`);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to send password reset email' };
+    }
+  };
+
+  const sendPhoneOtp = async (phone: string, containerId: string): Promise<{ success: boolean; confirmationResult?: any; error?: string }> => {
+    try {
+      if (!auth) throw new Error('Firebase Auth is not initialized');
+      const cleanPhone = phone.replace(/\D/g, '').slice(-10);
+      const formattedPhone = `+91${cleanPhone}`;
+
+      if ((window as any).recaptchaVerifier) {
+        try {
+          (window as any).recaptchaVerifier.clear();
+        } catch {}
+      }
+
+      const appVerifier = new RecaptchaVerifier(auth, containerId, {
+        size: 'invisible',
+      });
+      (window as any).recaptchaVerifier = appVerifier;
+
+      const confirmationResult = await signInWithPhoneNumber(auth, formattedPhone, appVerifier);
+      showToast(`OTP sent to ${formattedPhone}`);
+      return { success: true, confirmationResult };
+    } catch (err: any) {
+      console.error('Phone OTP error:', err);
+      return { success: false, error: err.message || 'Failed to send OTP' };
+    }
+  };
+
+  const verifyPhoneOtp = async (confirmationResult: any, code: string, fullName?: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      if (!confirmationResult) throw new Error('No active OTP request found');
+      const result = await confirmationResult.confirm(code);
+      const fbUser = result.user;
+
+      const { user, token } = await api.syncFirebaseAuth({
+        uid: fbUser.uid,
+        phone: fbUser.phoneNumber || undefined,
+        fullName: fullName || fbUser.displayName || 'Valued Customer',
+        authProvider: 'phone',
+        phoneVerified: true,
+      });
+
+      setAuthToken(token);
+      setCurrentUser(user);
+      setSavedAddresses(user.addresses || []);
+      try {
+        localStorage.setItem('kvn_customer_token', token);
+        localStorage.setItem('kvn_customer_user', JSON.stringify(user));
+      } catch {}
+      showToast(`Phone verified! Welcome, ${user.fullName}`);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Invalid OTP code' };
+    }
+  };
+
   const logoutCustomer = () => {
+    if (auth) {
+      signOut(auth).catch(() => {});
+    }
     setAuthToken(null);
     setCurrentUser(null);
     setSavedAddresses([]);
@@ -341,6 +561,8 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
   return (
     <ShopContext.Provider
       value={{
+        products,
+        refreshProducts,
         cart,
         addToCart,
         updateCartQuantity,
@@ -358,8 +580,15 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
         currentUser,
         authToken,
         savedAddresses,
+        isFirebaseAvailable,
         loginCustomer,
         registerCustomer,
+        loginWithGoogle,
+        loginWithEmail,
+        registerWithEmail,
+        sendPasswordReset,
+        sendPhoneOtp,
+        verifyPhoneOtp,
         logoutCustomer,
         refreshUserProfile,
         addSavedAddress,

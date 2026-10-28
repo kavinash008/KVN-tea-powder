@@ -1,0 +1,421 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// This security rules file assumes the following data structures:
+//
+// 1. Collection: users
+//    Document ID: {userId} (matches Firebase Auth UID)
+//    Fields:
+//      - id: string (optional, 1..128 chars, matches userId)
+//      - fullName: string (required, 1..100 chars)
+//      - phone: string (required, 7..20 chars)
+//      - email: string (optional, valid email format, max 100 chars)
+//      - authProvider: string (optional, in ['password', 'google', 'phone', 'email'])
+//      - firebaseUid: string (optional, 1..128 chars, matches userId)
+//      - emailVerified: bool (optional)
+//      - phoneVerified: bool (optional)
+//      - role: string (optional, in ['customer', 'admin']) - immutable for non-admin
+//      - addresses: list (optional, max 20 items)
+//      - createdAt: timestamp or ISO 8601 string (optional, immutable)
+//      - updatedAt: timestamp or ISO 8601 string (optional)
+//
+// 2. Collection: users/{userId}/addresses
+//    Document ID: {addressId}
+//    Fields:
+//      - id: string (optional, max 100 chars)
+//      - label: string (required, in ['Home', 'Work', 'Other'])
+//      - recipientName: string (required, 1..100 chars)
+//      - phone: string (required, 7..20 chars)
+//      - addressLine: string (required, 3..300 chars)
+//      - landmark: string (optional, max 150 chars)
+//      - villageTown: string (required, 1..100 chars)
+//      - district: string (required, 1..100 chars)
+//      - state: string (required, 1..100 chars)
+//      - pincode: string (required, 4..10 chars)
+//      - isDefault: bool (optional)
+//      - coordinates: map (optional, keys ['latitude', 'longitude'])
+//      - createdAt: timestamp or ISO 8601 string (optional, immutable)
+//      - updatedAt: timestamp or ISO 8601 string (optional)
+//
+// 3. Collection: products
+//    Document ID: {productId}
+//    Fields:
+//      - id: string (optional, max 100 chars)
+//      - sku: string (required, 1..100 chars)
+//      - name: string (required, 1..150 chars)
+//      - slug: string (required, 1..150 chars)
+//      - categorySlug: string (required, 1..100 chars)
+//      - mainCategory: string (required, in ['tea', 'coffee', 'combo', 'grocery'])
+//      - brand: string (required, 1..100 chars)
+//      - description: string (optional, max 5000 chars)
+//      - brewingInstructions: string (optional, max 2000 chars)
+//      - ingredients: string (optional, max 1000 chars)
+//      - images: list of string (optional, max 20 URLs)
+//      - variants: list of map (required, 1..20 items)
+//      - isFeatured: bool (optional)
+//      - isBestSeller: bool (optional)
+//      - isNewArrival: bool (optional)
+//      - status: string (required, in ['published', 'draft', 'archived'])
+//      - createdAt: timestamp or ISO 8601 string (optional, immutable)
+//      - updatedAt: timestamp or ISO 8601 string (optional)
+//
+// 4. Collection: orders
+//    Document ID: {orderId}
+//    Fields:
+//      - id: string (optional, max 100 chars)
+//      - orderNumber: string (required, 3..50 chars, immutable)
+//      - customerId: string (required for non-admin, matches request.auth.uid, immutable)
+//      - customer: map (required, customer shipping details)
+//          * fullName: string (required, 1..100 chars)
+//          * phone: string (required, 7..20 chars)
+//          * email: string (optional, valid email format)
+//          * address: string (required, 3..300 chars)
+//          * villageTown: string (required, 1..100 chars)
+//          * district: string (required, 1..100 chars)
+//          * state: string (required, 1..100 chars)
+//          * pincode: string (required, 4..10 chars)
+//          * deliveryInstructions: string (optional, max 500 chars)
+//      - addressSnapshot: map (optional, max 20 keys)
+//      - items: list of map (required, 1..50 items, immutable)
+//      - subtotal: number (optional, >= 0, immutable)
+//      - deliveryCharge: number (optional, >= 0)
+//      - discountAmount: number (optional, >= 0)
+//      - couponCode: string (optional, max 50 chars)
+//      - totalAmount: number (required, >= 0, immutable)
+//      - paymentMethod: string (optional, in ['COD', 'ONLINE_UPI'])
+//      - paymentStatus: string (optional, in ['Pending', 'Paid', 'Failed', 'Refunded'])
+//      - orderStatus: string (required, on create: ['Order Confirmed', 'Pending'])
+//      - statusHistory: list of map (optional, max 50 items)
+//      - whatsappStatus: string (optional, in ['pending', 'sent', 'failed', 'not_configured'])
+//      - whatsappSentAt: string or timestamp (optional)
+//      - whatsappError: string (optional, max 500 chars)
+//      - excelSyncStatus: string (optional, in ['pending', 'synced', 'failed', 'not_configured'])
+//      - excelSyncAt: string or timestamp (optional)
+//      - excelError: string (optional, max 500 chars)
+//      - notes: string (optional, max 1000 chars)
+//      - createdAt: timestamp or ISO 8601 string (optional, immutable)
+//      - updatedAt: timestamp or ISO 8601 string (optional)
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the user is authenticated with Firebase Auth
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if user owns the document by matching userId in the route
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Check if caller possesses administrator authority via custom claims or verified bootstrap email
+    function isAdmin() {
+      return isAuthenticated() && (
+        ('role' in request.auth.token && request.auth.token.role == 'admin') ||
+        ('admin' in request.auth.token && request.auth.token.admin == true) ||
+        ('email' in request.auth.token &&
+         'email_verified' in request.auth.token &&
+         request.auth.token.email == 'krishnamoorthykavinash@gmail.com' &&
+         request.auth.token.email_verified == true)
+      );
+    }
+
+    // Validate that immutable fields have not been modified during an update
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // Validate email format
+    function isValidEmail(email) {
+      return email is string &&
+             email.size() <= 100 &&
+             email.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+[.][a-zA-Z]{2,}$');
+    }
+
+    // Validate ISO 8601 date string or Firestore timestamp
+    function isValidDateOrTimestamp(val) {
+      return val is timestamp ||
+             (val is string && val.size() <= 50 && val.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}.*Z?$'));
+    }
+
+    // Prevent privilege escalation on user create: non-admins cannot set role to admin
+    function canCreateUserRole() {
+      return isAdmin() || (!('role' in request.resource.data) || request.resource.data.role == 'customer');
+    }
+
+    // Prevent privilege escalation on user update: non-admins cannot modify the role field
+    function canUpdateUserRole() {
+      return isAdmin() || areImmutableFieldsUnchanged(['role']);
+    }
+
+    // ===============================================================
+    // Domain Validators (Validator Function Pattern)
+    // ===============================================================
+
+    // Validates the structure and constraints of a User document
+    function isValidUser(data) {
+      return data.keys().hasAll(['fullName', 'phone']) &&
+             data.keys().hasOnly([
+               'id', 'fullName', 'phone', 'email', 'authProvider',
+               'firebaseUid', 'emailVerified', 'phoneVerified',
+               'role', 'addresses', 'createdAt', 'updatedAt'
+             ]) &&
+             data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 100 &&
+             data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 20 &&
+             (!('id' in data) || (data.id is string && data.id.size() <= 128)) &&
+             (!('email' in data) || isValidEmail(data.email)) &&
+             (!('authProvider' in data) || (data.authProvider is string && data.authProvider in ['password', 'google', 'phone', 'email'])) &&
+             (!('firebaseUid' in data) || (data.firebaseUid is string && data.firebaseUid.size() <= 128)) &&
+             (!('emailVerified' in data) || data.emailVerified is bool) &&
+             (!('phoneVerified' in data) || data.phoneVerified is bool) &&
+             (!('role' in data) || (data.role is string && data.role in ['customer', 'admin'])) &&
+             (!('addresses' in data) || (data.addresses is list && data.addresses.size() <= 20)) &&
+             (!('createdAt' in data) || isValidDateOrTimestamp(data.createdAt)) &&
+             (!('updatedAt' in data) || isValidDateOrTimestamp(data.updatedAt));
+    }
+
+    // Validates a saved delivery address document
+    function isValidAddress(data) {
+      return data.keys().hasAll(['label', 'recipientName', 'phone', 'addressLine', 'villageTown', 'district', 'state', 'pincode']) &&
+             data.keys().hasOnly([
+               'id', 'label', 'recipientName', 'phone', 'addressLine',
+               'landmark', 'villageTown', 'district', 'state', 'pincode',
+               'isDefault', 'coordinates', 'createdAt', 'updatedAt'
+             ]) &&
+             data.label is string && data.label in ['Home', 'Work', 'Other'] &&
+             data.recipientName is string && data.recipientName.size() >= 1 && data.recipientName.size() <= 100 &&
+             data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 20 &&
+             data.addressLine is string && data.addressLine.size() >= 3 && data.addressLine.size() <= 300 &&
+             (!('landmark' in data) || (data.landmark is string && data.landmark.size() <= 150)) &&
+             data.villageTown is string && data.villageTown.size() >= 1 && data.villageTown.size() <= 100 &&
+             data.district is string && data.district.size() >= 1 && data.district.size() <= 100 &&
+             data.state is string && data.state.size() >= 1 && data.state.size() <= 100 &&
+             data.pincode is string && data.pincode.size() >= 4 && data.pincode.size() <= 10 &&
+             (!('id' in data) || (data.id is string && data.id.size() <= 100)) &&
+             (!('isDefault' in data) || data.isDefault is bool) &&
+             (!('coordinates' in data) || (data.coordinates is map && data.coordinates.keys().hasOnly(['latitude', 'longitude']))) &&
+             (!('createdAt' in data) || isValidDateOrTimestamp(data.createdAt)) &&
+             (!('updatedAt' in data) || isValidDateOrTimestamp(data.updatedAt));
+    }
+
+    // Validates a product catalog document
+    function isValidProduct(data) {
+      return data.keys().hasAll(['sku', 'name', 'slug', 'categorySlug', 'mainCategory', 'brand', 'variants', 'status']) &&
+             data.keys().hasOnly([
+               'id', 'sku', 'name', 'slug', 'categorySlug', 'mainCategory',
+               'brand', 'description', 'brewingInstructions', 'ingredients',
+               'images', 'variants', 'isFeatured', 'isBestSeller',
+               'isNewArrival', 'status', 'createdAt', 'updatedAt'
+             ]) &&
+             (!('id' in data) || (data.id is string && data.id.size() <= 100)) &&
+             data.sku is string && data.sku.size() >= 1 && data.sku.size() <= 100 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 150 &&
+             data.slug is string && data.slug.size() >= 1 && data.slug.size() <= 150 &&
+             data.categorySlug is string && data.categorySlug.size() >= 1 && data.categorySlug.size() <= 100 &&
+             data.mainCategory is string && data.mainCategory in ['tea', 'coffee', 'combo', 'grocery'] &&
+             data.brand is string && data.brand.size() >= 1 && data.brand.size() <= 100 &&
+             (!('description' in data) || (data.description is string && data.description.size() <= 5000)) &&
+             (!('brewingInstructions' in data) || (data.brewingInstructions is string && data.brewingInstructions.size() <= 2000)) &&
+             (!('ingredients' in data) || (data.ingredients is string && data.ingredients.size() <= 1000)) &&
+             (!('images' in data) || (data.images is list && data.images.size() <= 20)) &&
+             data.variants is list && data.variants.size() >= 1 && data.variants.size() <= 20 &&
+             (!('isFeatured' in data) || data.isFeatured is bool) &&
+             (!('isBestSeller' in data) || data.isBestSeller is bool) &&
+             (!('isNewArrival' in data) || data.isNewArrival is bool) &&
+             data.status is string && data.status in ['published', 'draft', 'archived'] &&
+             (!('createdAt' in data) || isValidDateOrTimestamp(data.createdAt)) &&
+             (!('updatedAt' in data) || isValidDateOrTimestamp(data.updatedAt));
+    }
+
+    // Validates the nested customer contact/shipping map in an Order
+    function isValidOrderCustomer(customer) {
+      return customer is map &&
+             customer.keys().hasAll(['fullName', 'phone', 'address', 'villageTown', 'district', 'state', 'pincode']) &&
+             customer.keys().hasOnly([
+               'fullName', 'phone', 'email', 'address', 'villageTown',
+               'district', 'state', 'pincode', 'deliveryInstructions', 'coordinates'
+             ]) &&
+             customer.fullName is string && customer.fullName.size() >= 1 && customer.fullName.size() <= 100 &&
+             customer.phone is string && customer.phone.size() >= 7 && customer.phone.size() <= 20 &&
+             (!('email' in customer) || isValidEmail(customer.email)) &&
+             customer.address is string && customer.address.size() >= 3 && customer.address.size() <= 300 &&
+             customer.villageTown is string && customer.villageTown.size() >= 1 && customer.villageTown.size() <= 100 &&
+             customer.district is string && customer.district.size() >= 1 && customer.district.size() <= 100 &&
+             customer.state is string && customer.state.size() >= 1 && customer.state.size() <= 100 &&
+             customer.pincode is string && customer.pincode.size() >= 4 && customer.pincode.size() <= 10 &&
+             (!('deliveryInstructions' in customer) || (customer.deliveryInstructions is string && customer.deliveryInstructions.size() <= 500));
+    }
+
+    // Validates order fields on initial order creation
+    function isValidOrderCreate(data) {
+      return data.keys().hasAll(['orderNumber', 'customer', 'items', 'totalAmount', 'orderStatus']) &&
+             data.keys().hasOnly([
+               'id', 'orderNumber', 'customerId', 'customer', 'addressSnapshot',
+               'items', 'subtotal', 'deliveryCharge', 'discountAmount', 'couponCode',
+               'totalAmount', 'paymentMethod', 'paymentStatus', 'orderStatus',
+               'statusHistory', 'whatsappStatus', 'whatsappSentAt', 'whatsappError',
+               'excelSyncStatus', 'excelSyncAt', 'excelError', 'notes',
+               'createdAt', 'updatedAt'
+             ]) &&
+             (!('id' in data) || (data.id is string && data.id.size() <= 100)) &&
+             data.orderNumber is string && data.orderNumber.size() >= 3 && data.orderNumber.size() <= 50 &&
+             (!('customerId' in data) || (data.customerId is string && data.customerId.size() <= 128)) &&
+             isValidOrderCustomer(data.customer) &&
+             (!('addressSnapshot' in data) || (data.addressSnapshot is map && data.addressSnapshot.size() <= 25)) &&
+             data.items is list && data.items.size() >= 1 && data.items.size() <= 50 &&
+             (!('subtotal' in data) || (data.subtotal is number && data.subtotal >= 0)) &&
+             (!('deliveryCharge' in data) || (data.deliveryCharge is number && data.deliveryCharge >= 0)) &&
+             (!('discountAmount' in data) || (data.discountAmount is number && data.discountAmount >= 0)) &&
+             (!('couponCode' in data) || (data.couponCode is string && data.couponCode.size() <= 50)) &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             (!('paymentMethod' in data) || (data.paymentMethod is string && data.paymentMethod in ['COD', 'ONLINE_UPI'])) &&
+             (!('paymentStatus' in data) || (data.paymentStatus is string && (data.paymentStatus == 'Pending' || isAdmin()))) &&
+             data.orderStatus is string && data.orderStatus in ['Order Confirmed', 'Pending'] &&
+             (!('statusHistory' in data) || (data.statusHistory is list && data.statusHistory.size() <= 50)) &&
+             (!('whatsappStatus' in data) || (data.whatsappStatus is string && data.whatsappStatus in ['pending', 'sent', 'failed', 'not_configured'])) &&
+             (!('excelSyncStatus' in data) || (data.excelSyncStatus is string && data.excelSyncStatus in ['pending', 'synced', 'failed', 'not_configured'])) &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
+             (!('createdAt' in data) || isValidDateOrTimestamp(data.createdAt)) &&
+             (!('updatedAt' in data) || isValidDateOrTimestamp(data.updatedAt));
+    }
+
+    // Validates order fields during administrative updates
+    function isValidOrderUpdate(data) {
+      return data.keys().hasAll(['orderNumber', 'customer', 'items', 'totalAmount', 'orderStatus']) &&
+             data.keys().hasOnly([
+               'id', 'orderNumber', 'customerId', 'customer', 'addressSnapshot',
+               'items', 'subtotal', 'deliveryCharge', 'discountAmount', 'couponCode',
+               'totalAmount', 'paymentMethod', 'paymentStatus', 'orderStatus',
+               'statusHistory', 'whatsappStatus', 'whatsappSentAt', 'whatsappError',
+               'excelSyncStatus', 'excelSyncAt', 'excelError', 'notes',
+               'createdAt', 'updatedAt'
+             ]) &&
+             (!('id' in data) || (data.id is string && data.id.size() <= 100)) &&
+             data.orderNumber is string && data.orderNumber.size() >= 3 && data.orderNumber.size() <= 50 &&
+             (!('customerId' in data) || (data.customerId is string && data.customerId.size() <= 128)) &&
+             isValidOrderCustomer(data.customer) &&
+             (!('addressSnapshot' in data) || (data.addressSnapshot is map && data.addressSnapshot.size() <= 25)) &&
+             data.items is list && data.items.size() >= 1 && data.items.size() <= 50 &&
+             (!('subtotal' in data) || (data.subtotal is number && data.subtotal >= 0)) &&
+             (!('deliveryCharge' in data) || (data.deliveryCharge is number && data.deliveryCharge >= 0)) &&
+             (!('discountAmount' in data) || (data.discountAmount is number && data.discountAmount >= 0)) &&
+             (!('couponCode' in data) || (data.couponCode is string && data.couponCode.size() <= 50)) &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             (!('paymentMethod' in data) || (data.paymentMethod is string && data.paymentMethod in ['COD', 'ONLINE_UPI'])) &&
+             (!('paymentStatus' in data) || (data.paymentStatus is string && data.paymentStatus in ['Pending', 'Paid', 'Failed', 'Refunded'])) &&
+             data.orderStatus is string && data.orderStatus in [
+               'Pending',
+               'Payment Pending',
+               'Payment Confirmed',
+               'Order Confirmed',
+               'Processing',
+               'Packing',
+               'Dispatched',
+               'Out for Delivery',
+               'Delivered',
+               'Cancelled'
+             ] &&
+             (!('statusHistory' in data) || (data.statusHistory is list && data.statusHistory.size() <= 50)) &&
+             (!('whatsappStatus' in data) || (data.whatsappStatus is string && data.whatsappStatus in ['pending', 'sent', 'failed', 'not_configured'])) &&
+             (!('excelSyncStatus' in data) || (data.excelSyncStatus is string && data.excelSyncStatus in ['pending', 'synced', 'failed', 'not_configured'])) &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
+             (!('updatedAt' in data) || isValidDateOrTimestamp(data.updatedAt));
+    }
+
+    // Helper to verify customer ownership of order document
+    function isOrderOwner() {
+      return isAuthenticated() &&
+             'customerId' in resource.data &&
+             resource.data.customerId == request.auth.uid;
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    // 1. users/{userId}
+    // Users can read and update their own document. Admin can read all users.
+    // Self-role escalation is strictly prevented.
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+
+      allow create: if (isOwner(userId) || isAdmin()) &&
+                    canCreateUserRole() &&
+                    isValidUser(request.resource.data) &&
+                    (!('id' in request.resource.data) || request.resource.data.id == userId || isAdmin()) &&
+                    (!('firebaseUid' in request.resource.data) || request.resource.data.firebaseUid == userId || isAdmin());
+
+      allow update: if (isOwner(userId) || isAdmin()) &&
+                    canUpdateUserRole() &&
+                    isValidUser(request.resource.data) &&
+                    areImmutableFieldsUnchanged(['id', 'firebaseUid', 'createdAt']);
+
+      allow delete: if isAdmin();
+
+      // 2. users/{userId}/addresses/{addressId}
+      // Only the profile owner or admin can read, create, update, delete saved delivery addresses.
+      match /addresses/{addressId} {
+        allow read: if isOwner(userId) || isAdmin();
+
+        allow create: if (isOwner(userId) || isAdmin()) &&
+                      isValidAddress(request.resource.data) &&
+                      (!('id' in request.resource.data) || request.resource.data.id == addressId || request.resource.data.id.size() <= 100);
+
+        allow update: if (isOwner(userId) || isAdmin()) &&
+                      isValidAddress(request.resource.data) &&
+                      areImmutableFieldsUnchanged(['id', 'createdAt']);
+
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+    }
+
+    // 3. products/{productId}
+    // Anyone (including unauthenticated public visitors) can read published products.
+    // Only verified administrators can create, update, or delete products.
+    match /products/{productId} {
+      allow read: if ('status' in resource.data && resource.data.status == 'published') || isAdmin();
+
+      allow create: if isAdmin() &&
+                    isValidProduct(request.resource.data);
+
+      allow update: if isAdmin() &&
+                    isValidProduct(request.resource.data) &&
+                    areImmutableFieldsUnchanged(['id', 'createdAt']);
+
+      allow delete: if isAdmin();
+    }
+
+    // 4. orders/{orderId}
+    // Authenticated customers can only read their own orders.
+    // Only authorized admin can list/read all orders and update orderStatus / paymentStatus.
+    // Creating an order requires valid schema and initial orderStatus in ['Order Confirmed', 'Pending'].
+    match /orders/{orderId} {
+      allow read: if isOrderOwner() || isAdmin();
+
+      allow create: if isAuthenticated() &&
+                    (('customerId' in request.resource.data && request.resource.data.customerId == request.auth.uid) || isAdmin()) &&
+                    isValidOrderCreate(request.resource.data);
+
+      allow update: if isAdmin() &&
+                    isValidOrderUpdate(request.resource.data) &&
+                    areImmutableFieldsUnchanged(['id', 'orderNumber', 'customerId', 'createdAt', 'items', 'totalAmount']);
+
+      allow delete: if isAdmin();
+    }
+
+    // 5. Default deny for all other collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

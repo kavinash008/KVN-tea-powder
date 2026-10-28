@@ -43,6 +43,11 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
     savedAddresses,
     loginCustomer,
     registerCustomer,
+    loginWithGoogle,
+    loginWithEmail,
+    registerWithEmail,
+    sendPhoneOtp,
+    verifyPhoneOtp,
     logoutCustomer,
     addSavedAddress,
     updateSavedAddress,
@@ -51,8 +56,19 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
 
   // Authentication mode for visitors: 'register' | 'login'
   const [authMode, setAuthMode] = useState<'register' | 'login'>('register');
+  const [checkoutAuthMethod, setCheckoutAuthMethod] = useState<'password' | 'otp' | 'email'>('password');
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authError, setAuthError] = useState('');
+
+  // Phone OTP state
+  const [otpPhone, setOtpPhone] = useState('');
+  const [otpCode, setOtpCode] = useState('');
+  const [confirmationResult, setConfirmationResult] = useState<any>(null);
+  const [otpSent, setOtpSent] = useState(false);
+
+  // Email form state
+  const [emailInput, setEmailInput] = useState('');
+  const [emailPassword, setEmailPassword] = useState('');
 
   // Sign In form state
   const [loginPhone, setLoginPhone] = useState('');
@@ -415,6 +431,66 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
     }
   };
 
+  const handleGoogleSignIn = async () => {
+    setAuthError('');
+    setAuthSubmitting(true);
+    const res = await loginWithGoogle();
+    setAuthSubmitting(false);
+    if (!res.success) {
+      setAuthError(res.error || 'Google Sign-In failed');
+    }
+  };
+
+  const handleSendOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    const clean = otpPhone.replace(/\D/g, '').slice(-10);
+    if (clean.length < 10) {
+      setAuthError('Please enter a valid 10-digit mobile number');
+      return;
+    }
+    setAuthSubmitting(true);
+    const res = await sendPhoneOtp(clean, 'recaptcha-checkout-container');
+    setAuthSubmitting(false);
+    if (res.success && res.confirmationResult) {
+      setConfirmationResult(res.confirmationResult);
+      setOtpSent(true);
+    } else {
+      setAuthError(res.error || 'Failed to send OTP. Please check your number.');
+    }
+  };
+
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    if (!otpCode || otpCode.trim().length < 6) {
+      setAuthError('Please enter the 6-digit OTP code');
+      return;
+    }
+    setAuthSubmitting(true);
+    const res = await verifyPhoneOtp(confirmationResult, otpCode.trim(), regFullName || undefined);
+    setAuthSubmitting(false);
+    if (!res.success) {
+      setAuthError(res.error || 'Invalid OTP code');
+    }
+  };
+
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSubmitting(true);
+    let res;
+    if (authMode === 'login') {
+      res = await loginWithEmail(emailInput, emailPassword);
+    } else {
+      res = await registerWithEmail(emailInput, emailPassword, regFullName, regPhone);
+    }
+    setAuthSubmitting(false);
+    if (!res.success) {
+      setAuthError(res.error || 'Email authentication failed');
+    }
+  };
+
   // 3. Final Order Submission for authenticated customer
   const handleFinalOrderSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -444,7 +520,8 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
           items: cart,
           paymentMethod: paymentMethod === 'COD' ? 'COD' : 'ONLINE_UPI',
           notes: customer.deliveryInstructions,
-        },
+          addressId: selectedAddrId,
+        } as any,
         authToken
       );
 
@@ -503,6 +580,30 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
               </div>
 
               {/* Mode Toggle Tabs */}
+              {/* Quick Google Sign In */}
+              <button
+                type="button"
+                onClick={handleGoogleSignIn}
+                disabled={authSubmitting}
+                className="w-full py-3 px-4 bg-white border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs sm:text-sm font-semibold rounded-xl flex items-center justify-center gap-2.5 shadow-2xs transition-all cursor-pointer mb-5"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                </svg>
+                Quick Sign-In with Google
+              </button>
+
+              <div className="flex items-center gap-3 mb-5">
+                <div className="h-px bg-stone-200 flex-1"></div>
+                <span className="text-[11px] text-stone-400 uppercase font-medium">Or enter details</span>
+                <div className="h-px bg-stone-200 flex-1"></div>
+              </div>
+
+              <div id="recaptcha-checkout-container"></div>
+
               <div className="flex border-b border-stone-200 mb-6">
                 <button
                   type="button"
@@ -746,51 +847,177 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
                 </form>
               ) : (
                 /* TAB 2: SIGN IN FOR RETURNING CUSTOMERS */
-                <form onSubmit={handleLoginBeforeCheckout} className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Registered 10-Digit Mobile Number *
-                    </label>
-                    <input
-                      type="tel"
-                      required
-                      maxLength={10}
-                      value={loginPhone}
-                      onChange={(e) => setLoginPhone(e.target.value)}
-                      placeholder="Enter your 10-digit mobile number"
-                      className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 mb-1">
-                      Account Password *
-                    </label>
-                    <input
-                      type="password"
-                      required
-                      value={loginPassword}
-                      onChange={(e) => setLoginPassword(e.target.value)}
-                      placeholder="Enter your password"
-                      className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
-                    />
-                  </div>
-
-                  <div className="pt-2">
+                <div className="space-y-4">
+                  <div className="grid grid-cols-3 gap-1 p-1 bg-stone-100 rounded-xl mb-3 text-[11px] font-semibold text-stone-600">
                     <button
-                      type="submit"
-                      disabled={authSubmitting}
-                      className="w-full py-3.5 bg-[#143728] text-white font-bold text-xs sm:text-sm rounded-xl hover:bg-[#204e37] transition-all disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer shadow-md"
+                      type="button"
+                      onClick={() => { setCheckoutAuthMethod('password'); setAuthError(''); }}
+                      className={`py-1.5 rounded-lg transition-all ${checkoutAuthMethod === 'password' ? 'bg-white shadow-2xs text-[#143728] font-bold' : 'hover:text-stone-900'}`}
                     >
-                      {authSubmitting ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin" /> Signing In & Loading Profile...
-                        </>
-                      ) : (
-                        'Sign In & Proceed to Checkout'
-                      )}
+                      Mobile + Pass
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setCheckoutAuthMethod('otp'); setAuthError(''); }}
+                      className={`py-1.5 rounded-lg transition-all ${checkoutAuthMethod === 'otp' ? 'bg-white shadow-2xs text-[#143728] font-bold' : 'hover:text-stone-900'}`}
+                    >
+                      Phone OTP
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setCheckoutAuthMethod('email'); setAuthError(''); }}
+                      className={`py-1.5 rounded-lg transition-all ${checkoutAuthMethod === 'email' ? 'bg-white shadow-2xs text-[#143728] font-bold' : 'hover:text-stone-900'}`}
+                    >
+                      Email / Pass
                     </button>
                   </div>
-                </form>
+
+                  {checkoutAuthMethod === 'otp' ? (
+                    !otpSent ? (
+                      <form onSubmit={handleSendOtp} className="space-y-3.5">
+                        <div>
+                          <label className="block text-xs font-semibold text-stone-700 mb-1">
+                            Mobile Number (India) *
+                          </label>
+                          <div className="flex">
+                            <span className="inline-flex items-center px-3 text-xs bg-stone-100 border border-r-0 border-stone-200 rounded-l-xl text-stone-600 font-semibold">+91</span>
+                            <input
+                              type="tel"
+                              required
+                              maxLength={10}
+                              value={otpPhone}
+                              onChange={(e) => setOtpPhone(e.target.value)}
+                              placeholder="10-digit mobile number"
+                              className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-r-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                            />
+                          </div>
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={authSubmitting}
+                          className="w-full py-3 bg-[#143728] text-white text-xs font-bold rounded-xl hover:bg-[#204e37] transition-all disabled:opacity-50 cursor-pointer"
+                        >
+                          {authSubmitting ? 'Sending OTP...' : 'Send OTP via SMS'}
+                        </button>
+                      </form>
+                    ) : (
+                      <form onSubmit={handleVerifyOtp} className="space-y-3.5">
+                        <div>
+                          <label className="block text-xs font-semibold text-stone-700 mb-1">
+                            6-Digit OTP Code *
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            maxLength={6}
+                            value={otpCode}
+                            onChange={(e) => setOtpCode(e.target.value)}
+                            placeholder="e.g. 123456"
+                            className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs tracking-widest text-center font-bold text-stone-800 focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                          />
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => { setOtpSent(false); setOtpCode(''); }}
+                            className="flex-1 py-2.5 border border-stone-300 text-stone-700 text-xs font-semibold rounded-xl hover:bg-stone-50"
+                          >
+                            Change Number
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={authSubmitting}
+                            className="flex-1 py-2.5 bg-[#143728] text-white text-xs font-bold rounded-xl hover:bg-[#204e37] transition-all disabled:opacity-50 cursor-pointer"
+                          >
+                            {authSubmitting ? 'Verifying...' : 'Verify OTP & Continue'}
+                          </button>
+                        </div>
+                      </form>
+                    )
+                  ) : checkoutAuthMethod === 'email' ? (
+                    <form onSubmit={handleEmailAuth} className="space-y-3.5">
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 mb-1">
+                          Email Address *
+                        </label>
+                        <input
+                          type="email"
+                          required
+                          value={emailInput}
+                          onChange={(e) => setEmailInput(e.target.value)}
+                          placeholder="name@example.com"
+                          className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 mb-1">
+                          Password *
+                        </label>
+                        <input
+                          type="password"
+                          required
+                          value={emailPassword}
+                          onChange={(e) => setEmailPassword(e.target.value)}
+                          placeholder="Enter your password"
+                          className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={authSubmitting}
+                        className="w-full py-3 bg-[#143728] text-white text-xs font-bold rounded-xl hover:bg-[#204e37] transition-all disabled:opacity-50 cursor-pointer"
+                      >
+                        {authSubmitting ? 'Signing In...' : 'Sign In with Email'}
+                      </button>
+                    </form>
+                  ) : (
+                    <form onSubmit={handleLoginBeforeCheckout} className="space-y-4">
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 mb-1">
+                          Registered 10-Digit Mobile Number *
+                        </label>
+                        <input
+                          type="tel"
+                          required
+                          maxLength={10}
+                          value={loginPhone}
+                          onChange={(e) => setLoginPhone(e.target.value)}
+                          placeholder="Enter your 10-digit mobile number"
+                          className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 mb-1">
+                          Account Password *
+                        </label>
+                        <input
+                          type="password"
+                          required
+                          value={loginPassword}
+                          onChange={(e) => setLoginPassword(e.target.value)}
+                          placeholder="Enter your password"
+                          className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:border-[#2e5e43]"
+                        />
+                      </div>
+
+                      <div className="pt-2">
+                        <button
+                          type="submit"
+                          disabled={authSubmitting}
+                          className="w-full py-3.5 bg-[#143728] text-white font-bold text-xs sm:text-sm rounded-xl hover:bg-[#204e37] transition-all disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer shadow-md"
+                        >
+                          {authSubmitting ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" /> Signing In & Loading Profile...
+                            </>
+                          ) : (
+                            'Sign In & Proceed to Checkout'
+                          )}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </div>
               )}
             </div>
           ) : (

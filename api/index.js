@@ -194,7 +194,11 @@ function getLocalFilePath() {
   }
   return LOCAL_DATA_FILE;
 }
+var localStateCache = null;
 function ensureLocalFile() {
+  if (localStateCache) {
+    return localStateCache;
+  }
   const filePath = getLocalFilePath();
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
@@ -203,50 +207,56 @@ function ensureLocalFile() {
     } catch {
     }
   }
+  const initialState = {
+    orders: [],
+    users: [],
+    products: INITIAL_PRODUCTS,
+    webhookEvents: [],
+    lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
+  };
   if (!fs.existsSync(filePath)) {
-    const initialState = {
-      orders: [],
-      users: [],
-      products: INITIAL_PRODUCTS,
-      webhookEvents: [],
-      lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
-    };
     try {
       fs.writeFileSync(filePath, JSON.stringify(initialState, null, 2), "utf-8");
     } catch {
     }
-    return initialState;
+    localStateCache = initialState;
+    return localStateCache;
   }
   try {
     const content = fs.readFileSync(filePath, "utf-8");
+    if (!content || !content.trim()) {
+      fs.writeFileSync(filePath, JSON.stringify(initialState, null, 2), "utf-8");
+      localStateCache = initialState;
+      return localStateCache;
+    }
     const parsed = JSON.parse(content);
     parsed.webhookEvents = parsed.webhookEvents || [];
-    return parsed;
+    parsed.orders = parsed.orders || [];
+    parsed.users = parsed.users || [];
+    parsed.products = parsed.products || INITIAL_PRODUCTS;
+    localStateCache = parsed;
+    return localStateCache;
   } catch {
-    return {
-      orders: [],
-      users: [],
-      products: INITIAL_PRODUCTS,
-      webhookEvents: [],
-      lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
-    };
+    localStateCache = initialState;
+    return localStateCache;
   }
 }
-var fileWriteLock = Promise.resolve();
 async function saveLocalFile(state) {
-  fileWriteLock = fileWriteLock.then(async () => {
-    state.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
-    const filePath = getLocalFilePath();
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) {
-      try {
-        fs.mkdirSync(dir, { recursive: true });
-      } catch {
-      }
+  localStateCache = state;
+  state.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+  const filePath = getLocalFilePath();
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch {
     }
-    await fs.promises.writeFile(filePath, JSON.stringify(state, null, 2), "utf-8");
-  });
-  return fileWriteLock;
+  }
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(state, null, 2), "utf-8");
+  } catch {
+  }
+  return Promise.resolve();
 }
 async function getMongoDb() {
   if (!MONGODB_URI) {
@@ -275,13 +285,30 @@ async function getMongoDb() {
       });
       cachedDb.collection("orders").createIndex({ "customer.phone": 1 }).catch(() => {
       });
+      cachedDb.collection("orders").createIndex({ customerId: 1 }).catch(() => {
+      });
       cachedDb.collection("orders").createIndex({ createdAt: -1 }).catch(() => {
       });
-      cachedDb.collection("users").createIndex({ phone: 1 }, { unique: true }).catch(() => {
+      cachedDb.collection("users").createIndex({ phone: 1 }).catch(() => {
+      });
+      cachedDb.collection("users").createIndex({ email: 1 }).catch(() => {
+      });
+      cachedDb.collection("users").createIndex({ firebaseUid: 1 }).catch(() => {
+      });
+      cachedDb.collection("products").createIndex({ id: 1 }, { unique: true }).catch(() => {
       });
       cachedDb.collection("webhook_outbox").createIndex({ eventId: 1 }, { unique: true }).catch(() => {
       });
       cachedDb.collection("webhook_outbox").createIndex({ status: 1 }).catch(() => {
+      });
+      cachedDb.collection("products").countDocuments().then(async (count) => {
+        if (count === 0 && cachedDb) {
+          try {
+            await cachedDb.collection("products").insertMany(INITIAL_PRODUCTS);
+          } catch {
+          }
+        }
+      }).catch(() => {
       });
       return cachedDb;
     } catch (err) {
@@ -366,11 +393,14 @@ var serverDb = {
     const newOrder = {
       id: orderId,
       orderNumber,
+      customerId: orderData.customerId,
       customer: orderData.customer,
+      addressSnapshot: orderData.addressSnapshot,
       items: orderData.items,
       subtotal: orderData.subtotal || 0,
       deliveryCharge: orderData.deliveryCharge || 0,
       discountAmount: orderData.discountAmount || 0,
+      couponCode: orderData.couponCode,
       totalAmount: orderData.totalAmount,
       paymentMethod: orderData.paymentMethod || "COD",
       paymentStatus: orderData.paymentStatus || "Pending",
@@ -382,6 +412,8 @@ var serverDb = {
           note: "Order placed by customer via online store"
         }
       ],
+      whatsappStatus: orderData.whatsappStatus || "pending",
+      excelSyncStatus: orderData.excelSyncStatus || "pending",
       notes: orderData.notes || "",
       createdAt: now,
       updatedAt: now
@@ -393,12 +425,38 @@ var serverDb = {
     }
     if (db) {
       await db.collection("orders").insertOne(newOrder);
+      this.decrementProductStock(orderData.items).catch(() => {
+      });
       return newOrder;
     }
     const state = ensureLocalFile();
     state.orders.unshift(newOrder);
     await saveLocalFile(state);
+    this.decrementProductStock(orderData.items).catch(() => {
+    });
     return newOrder;
+  },
+  async updateOrderSyncStatuses(orderId, updates) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    let db = await getMongoDb();
+    if (db) {
+      await db.collection("orders").updateOne(
+        { $or: [{ id: orderId }, { orderNumber: orderId }] },
+        { $set: { ...updates, updatedAt: now } }
+      );
+      const updated = await db.collection("orders").findOne({
+        $or: [{ id: orderId }, { orderNumber: orderId }]
+      });
+      if (!updated) return null;
+      const { _id, ...rest } = updated;
+      return rest;
+    }
+    const state = ensureLocalFile();
+    const index = state.orders.findIndex((o) => o.id === orderId || o.orderNumber === orderId);
+    if (index === -1) return null;
+    state.orders[index] = { ...state.orders[index], ...updates, updatedAt: now };
+    await saveLocalFile(state);
+    return state.orders[index];
   },
   async updateOrderStatus(orderId, status, note) {
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -471,6 +529,117 @@ var serverDb = {
     const state = ensureLocalFile();
     const user = state.users.find((u) => u.phone.replace(/\D/g, "") === cleanPhone);
     return user || null;
+  },
+  async getUserByEmail(email) {
+    if (!email) return null;
+    const cleanEmail = email.trim().toLowerCase();
+    const db = await getMongoDb();
+    if (db) {
+      const doc = await db.collection("users").findOne({ email: cleanEmail });
+      if (!doc) return null;
+      const { _id, ...rest } = doc;
+      return rest;
+    }
+    const state = ensureLocalFile();
+    const user = state.users.find((u) => u.email && u.email.toLowerCase() === cleanEmail);
+    return user || null;
+  },
+  async getUserByFirebaseUid(uid) {
+    if (!uid) return null;
+    const db = await getMongoDb();
+    if (db) {
+      const doc = await db.collection("users").findOne({ firebaseUid: uid });
+      if (!doc) return null;
+      const { _id, ...rest } = doc;
+      return rest;
+    }
+    const state = ensureLocalFile();
+    const user = state.users.find((u) => u.firebaseUid === uid);
+    return user || null;
+  },
+  async upsertFirebaseUser(data) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const cleanEmail = data.email ? data.email.trim().toLowerCase() : void 0;
+    const cleanPhone = data.phone ? data.phone.replace(/\D/g, "").slice(-10) : "";
+    let existing = await this.getUserByFirebaseUid(data.firebaseUid);
+    if (!existing && cleanEmail) {
+      existing = await this.getUserByEmail(cleanEmail);
+    }
+    if (!existing && cleanPhone) {
+      existing = await this.getUserByPhone(cleanPhone);
+    }
+    if (existing) {
+      const updates = {
+        firebaseUid: data.firebaseUid,
+        authProvider: data.authProvider,
+        updatedAt: now
+      };
+      if (data.emailVerified !== void 0) updates.emailVerified = data.emailVerified;
+      if (data.phoneVerified !== void 0) updates.phoneVerified = data.phoneVerified;
+      if (cleanEmail && !existing.email) updates.email = cleanEmail;
+      if (cleanPhone && !existing.phone) updates.phone = cleanPhone;
+      if (data.fullName && (!existing.fullName || existing.fullName === "Guest Customer")) {
+        updates.fullName = data.fullName.trim();
+      }
+      const db2 = await getMongoDb();
+      if (db2) {
+        await db2.collection("users").updateOne(
+          { id: existing.id },
+          { $set: updates }
+        );
+        const updated = await this.getUserById(existing.id);
+        return updated || { ...existing, ...updates };
+      }
+      const state2 = ensureLocalFile();
+      const idx = state2.users.findIndex((u) => u.id === existing.id);
+      if (idx >= 0) {
+        state2.users[idx] = { ...state2.users[idx], ...updates };
+        await saveLocalFile(state2);
+        return state2.users[idx];
+      }
+      return { ...existing, ...updates };
+    }
+    const userId = `usr-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+    const addresses = [];
+    if (data.initialAddress && data.initialAddress.addressLine) {
+      addresses.push({
+        id: `addr-${Date.now()}-1`,
+        label: data.initialAddress.label || "Home",
+        recipientName: data.initialAddress.recipientName || data.fullName,
+        phone: data.initialAddress.phone || cleanPhone,
+        addressLine: data.initialAddress.addressLine,
+        landmark: data.initialAddress.landmark || "",
+        villageTown: data.initialAddress.villageTown || "",
+        district: data.initialAddress.district || "",
+        state: data.initialAddress.state || "Tamil Nadu",
+        pincode: data.initialAddress.pincode || "",
+        isDefault: true,
+        coordinates: data.initialAddress.coordinates,
+        createdAt: now
+      });
+    }
+    const newUser = {
+      id: userId,
+      fullName: data.fullName.trim() || "Valued Customer",
+      phone: cleanPhone,
+      email: cleanEmail || "",
+      firebaseUid: data.firebaseUid,
+      authProvider: data.authProvider,
+      emailVerified: Boolean(data.emailVerified),
+      phoneVerified: Boolean(data.phoneVerified),
+      addresses,
+      createdAt: now,
+      updatedAt: now
+    };
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection("users").insertOne(newUser);
+      return newUser;
+    }
+    const state = ensureLocalFile();
+    state.users.push(newUser);
+    await saveLocalFile(state);
+    return newUser;
   },
   async getUserById(id) {
     const db = await getMongoDb();
@@ -707,6 +876,98 @@ var serverDb = {
       failed: list.filter((r) => r.status === "failed").length,
       webhookUrlConfigured
     };
+  },
+  // ===================== PRODUCTS =====================
+  async getAllProducts() {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection("products").find({}).toArray();
+      if (docs.length > 0) {
+        return docs.map((d) => {
+          const { _id, ...rest } = d;
+          return rest;
+        });
+      }
+      await db.collection("products").insertMany(INITIAL_PRODUCTS).catch(() => {
+      });
+      return INITIAL_PRODUCTS;
+    }
+    const state = ensureLocalFile();
+    if (!state.products || state.products.length === 0) {
+      state.products = INITIAL_PRODUCTS;
+      await saveLocalFile(state);
+    }
+    return state.products;
+  },
+  async getProductById(id) {
+    const products = await this.getAllProducts();
+    return products.find((p) => p.id === id || p.slug === id) || null;
+  },
+  async saveProduct(product) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const updatedProduct = { ...product, updatedAt: now };
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection("products").updateOne(
+        { id: product.id },
+        { $set: updatedProduct },
+        { upsert: true }
+      );
+      return updatedProduct;
+    }
+    const state = ensureLocalFile();
+    state.products = state.products || [];
+    const idx = state.products.findIndex((p) => p.id === product.id);
+    if (idx >= 0) {
+      state.products[idx] = updatedProduct;
+    } else {
+      state.products.push(updatedProduct);
+    }
+    await saveLocalFile(state);
+    return updatedProduct;
+  },
+  async deleteProduct(id) {
+    const db = await getMongoDb();
+    if (db) {
+      const res = await db.collection("products").deleteOne({ id });
+      return res.deletedCount > 0;
+    }
+    const state = ensureLocalFile();
+    if (!state.products) return false;
+    const initialLen = state.products.length;
+    state.products = state.products.filter((p) => p.id !== id);
+    if (state.products.length !== initialLen) {
+      await saveLocalFile(state);
+      return true;
+    }
+    return false;
+  },
+  async decrementProductStock(items) {
+    if (!items || !items.length) return;
+    const db = await getMongoDb();
+    if (db) {
+      for (const item of items) {
+        if (!item.productId || !item.variantId) continue;
+        await db.collection("products").updateOne(
+          { id: item.productId, "variants.id": item.variantId },
+          { $inc: { "variants.$.stock": -(item.quantity || 1) } }
+        ).catch(() => {
+        });
+      }
+      return;
+    }
+    const state = ensureLocalFile();
+    if (!state.products) return;
+    for (const item of items) {
+      const prod = state.products.find((p) => p.id === item.productId);
+      if (prod && prod.variants) {
+        const variant = prod.variants.find((v) => v.id === item.variantId);
+        if (variant) {
+          variant.stock = Math.max(0, variant.stock - (item.quantity || 1));
+        }
+      }
+    }
+    await saveLocalFile(state);
   }
 };
 
@@ -1129,6 +1390,305 @@ var webhookService = {
   }
 };
 
+// server/_lib/whatsapp.ts
+var WhatsAppService = class {
+  constructor() {
+    this.phoneNumberId = (process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
+    this.accessToken = (process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
+    this.templateName = (process.env.WHATSAPP_TEMPLATE_NAME || "").trim();
+  }
+  isConfigured() {
+    return Boolean(this.phoneNumberId && this.accessToken);
+  }
+  /**
+   * Normalize an Indian phone number to E.164 format without leading '+'
+   * (e.g. 9787513911 -> 919787513911)
+   */
+  normalizePhone(phone) {
+    const digits = phone.replace(/\D/g, "");
+    if (digits.length === 10) {
+      return `91${digits}`;
+    }
+    if (digits.length === 12 && digits.startsWith("91")) {
+      return digits;
+    }
+    if (digits.length === 11 && digits.startsWith("0")) {
+      return `91${digits.slice(1)}`;
+    }
+    return digits;
+  }
+  /**
+   * Send WhatsApp order confirmation message via Meta WhatsApp Business Cloud API.
+   * If credentials are not configured, gracefully logs and records 'not_configured'.
+   */
+  async sendOrderConfirmation(order) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    if (!this.isConfigured()) {
+      return {
+        success: false,
+        status: "not_configured",
+        error: "WhatsApp Business Cloud API credentials not configured (WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN missing)"
+      };
+    }
+    const recipientPhone = this.normalizePhone(order.customer.phone);
+    if (!recipientPhone || recipientPhone.length < 10) {
+      return {
+        success: false,
+        status: "failed",
+        error: `Invalid customer phone number: ${order.customer.phone}`
+      };
+    }
+    const shortAddress = `${order.customer.address}, ${order.customer.villageTown} - ${order.customer.pincode}`;
+    const orderId = order.orderNumber || order.id;
+    const total = order.totalAmount;
+    const messageText = `Thank you for ordering from KVN Tea Powder! Your order has been placed successfully.
+
+Order ID: ${orderId}
+Order Total: \u20B9${total}
+Delivery Address: ${shortAddress}
+
+We will update you when your order status changes.`;
+    const apiUrl = `https://graph.facebook.com/v21.0/${this.phoneNumberId}/messages`;
+    const payload = this.templateName ? {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: recipientPhone,
+      type: "template",
+      template: {
+        name: this.templateName,
+        language: { code: "en" },
+        components: [
+          {
+            type: "body",
+            parameters: [
+              { type: "text", text: orderId },
+              { type: "text", text: String(total) },
+              { type: "text", text: shortAddress }
+            ]
+          }
+        ]
+      }
+    } : {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: recipientPhone,
+      type: "text",
+      text: {
+        preview_url: false,
+        body: messageText
+      }
+    };
+    try {
+      const response = await fetch(apiUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${this.accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+      const responseData = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const errorDetail = responseData?.error?.message || responseData?.error?.error_data?.details || `HTTP ${response.status}`;
+        console.warn(`WhatsApp Cloud API error for order ${orderId}:`, errorDetail);
+        return {
+          success: false,
+          status: "failed",
+          error: errorDetail
+        };
+      }
+      const messageId = responseData?.messages?.[0]?.id;
+      return {
+        success: true,
+        status: "sent",
+        messageId,
+        sentAt: now
+      };
+    } catch (err) {
+      console.error(`WhatsApp dispatch network exception for order ${orderId}:`, err);
+      return {
+        success: false,
+        status: "failed",
+        error: err.message || "Network error communicating with WhatsApp Cloud API"
+      };
+    }
+  }
+};
+var whatsappService = new WhatsAppService();
+
+// server/_lib/excelSync.ts
+var ExcelSyncService = class {
+  constructor() {
+    this.cachedToken = null;
+    this.tokenExpiresAt = 0;
+    this.tenantId = (process.env.MS_GRAPH_TENANT_ID || "").trim();
+    this.clientId = (process.env.MS_GRAPH_CLIENT_ID || "").trim();
+    this.clientSecret = (process.env.MS_GRAPH_CLIENT_SECRET || "").trim();
+    this.driveId = (process.env.MS_EXCEL_DRIVE_ID || "").trim();
+    this.fileId = (process.env.MS_EXCEL_FILE_ID || "").trim();
+    this.tableName = (process.env.MS_EXCEL_TABLE_NAME || "OrdersTable").trim();
+  }
+  isConfigured() {
+    return Boolean(
+      this.tenantId && this.clientId && this.clientSecret && this.driveId && this.fileId
+    );
+  }
+  getConfigurationStatus() {
+    return {
+      configured: this.isConfigured(),
+      tenantConfigured: Boolean(this.tenantId),
+      clientConfigured: Boolean(this.clientId),
+      secretConfigured: Boolean(this.clientSecret),
+      driveConfigured: Boolean(this.driveId),
+      fileConfigured: Boolean(this.fileId),
+      tableName: this.tableName
+    };
+  }
+  /**
+   * Acquire a valid Microsoft Graph OAuth 2.0 app-only access token.
+   */
+  async getAccessToken() {
+    if (this.cachedToken && Date.now() < this.tokenExpiresAt - 6e4) {
+      return this.cachedToken;
+    }
+    const tokenUrl = `https://login.microsoftonline.com/${this.tenantId}/oauth2/v2.0/token`;
+    const params = new URLSearchParams();
+    params.append("client_id", this.clientId);
+    params.append("client_secret", this.clientSecret);
+    params.append("grant_type", "client_credentials");
+    params.append("scope", "https://graph.microsoft.com/.default");
+    const response = await fetch(tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString()
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Failed to acquire Microsoft Graph token: ${response.status} ${errText}`);
+    }
+    const data = await response.json();
+    this.cachedToken = data.access_token;
+    this.tokenExpiresAt = Date.now() + (data.expires_in || 3600) * 1e3;
+    return this.cachedToken;
+  }
+  /**
+   * Format order into the recommended columns:
+   * Order ID, Order Date, Customer ID, Customer Name, Email, Phone, Product Summary, Quantities,
+   * Subtotal, Delivery Charge, Total, Payment Method, Payment Status, Order Status,
+   * Recipient Name, Delivery Phone, Address, City, State, PIN Code, WhatsApp Status, Excel Sync Status
+   */
+  buildOrderRowValues(order) {
+    const productSummary = (order.items || []).map((item) => `${item.productName} (${item.weight})`).join("; ");
+    const quantitiesSummary = (order.items || []).map((item) => `${item.productName}: ${item.quantity}`).join("; ");
+    const orderId = order.orderNumber || order.id;
+    const recipientName = order.customer.fullName || "Valued Customer";
+    const deliveryPhone = order.customer.phone || "";
+    const email = order.customer.email || "N/A";
+    const address = order.customer.address || "";
+    const city = order.customer.villageTown || "";
+    const state = order.customer.state || "Tamil Nadu";
+    const pincode = order.customer.pincode || "";
+    return [
+      orderId,
+      order.createdAt,
+      order.customerId || "GUEST",
+      recipientName,
+      email,
+      deliveryPhone,
+      productSummary,
+      quantitiesSummary,
+      order.subtotal,
+      order.deliveryCharge,
+      order.totalAmount,
+      order.paymentMethod,
+      order.paymentStatus,
+      order.orderStatus,
+      recipientName,
+      deliveryPhone,
+      address,
+      city,
+      state,
+      pincode,
+      order.whatsappStatus || "pending",
+      "synced"
+    ];
+  }
+  /**
+   * Append the order row to the configured Excel table in OneDrive/SharePoint.
+   * Performs idempotency check using Microsoft Graph API to prevent duplicate rows.
+   */
+  async syncOrderToExcel(order) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const orderId = order.orderNumber || order.id;
+    if (!this.isConfigured()) {
+      return {
+        success: false,
+        status: "not_configured",
+        error: "Microsoft Graph Excel credentials not configured (tenant, client ID, client secret, drive ID or file ID missing)"
+      };
+    }
+    try {
+      const accessToken = await this.getAccessToken();
+      const tableRowsUrl = `https://graph.microsoft.com/v1.0/drives/${this.driveId}/items/${this.fileId}/workbook/tables/${encodeURIComponent(this.tableName)}/rows`;
+      try {
+        const existingRowsRes = await fetch(tableRowsUrl, {
+          headers: { Authorization: `Bearer ${accessToken}` }
+        });
+        if (existingRowsRes.ok) {
+          const existingData = await existingRowsRes.json();
+          const rows = existingData?.value || [];
+          const exists = rows.some((row) => {
+            const rowValues2 = row.values?.[0] || [];
+            return rowValues2[0] === orderId;
+          });
+          if (exists) {
+            return {
+              success: true,
+              status: "synced",
+              syncedAt: now
+            };
+          }
+        }
+      } catch (checkErr) {
+        console.warn(`Excel idempotency check warning for order ${orderId}:`, checkErr);
+      }
+      const rowValues = this.buildOrderRowValues(order);
+      const appendResponse = await fetch(`${tableRowsUrl}/add`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          values: [rowValues]
+        })
+      });
+      if (!appendResponse.ok) {
+        const errText = await appendResponse.text();
+        console.warn(`Microsoft Graph Excel row append error for order ${orderId}:`, errText);
+        return {
+          success: false,
+          status: "failed",
+          error: `Graph API Error ${appendResponse.status}: ${errText.slice(0, 200)}`
+        };
+      }
+      return {
+        success: true,
+        status: "synced",
+        syncedAt: now
+      };
+    } catch (err) {
+      console.error(`Excel synchronization exception for order ${orderId}:`, err);
+      return {
+        success: false,
+        status: "failed",
+        error: err.message || "Network error syncing with Microsoft Graph API"
+      };
+    }
+  }
+};
+var excelSyncService = new ExcelSyncService();
+
 // server/index.ts
 var app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -1141,6 +1701,24 @@ app.use((req, res, next) => {
   }
   next();
 });
+var rateLimitMap = /* @__PURE__ */ new Map();
+function rateLimiter(limit, windowMs) {
+  return (req, res, next) => {
+    const ip = req.ip || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown";
+    const key = `${ip}:${req.path}`;
+    const now = Date.now();
+    const entry = rateLimitMap.get(key);
+    if (!entry || now > entry.resetAt) {
+      rateLimitMap.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    if (entry.count >= limit) {
+      return res.status(429).json({ error: "Too many requests. Please wait a moment and try again." });
+    }
+    entry.count++;
+    next();
+  };
+}
 function authenticateCustomer(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -1186,7 +1764,46 @@ router.get(["/", "/health"], async (_req, res) => {
     });
   }
 });
-router.post("/auth/register", async (req, res) => {
+router.post("/auth/firebase-sync", rateLimiter(20, 6e4), async (req, res) => {
+  try {
+    const { uid, email, phone, fullName, authProvider, emailVerified, phoneVerified, initialAddress } = req.body;
+    if (!uid) {
+      return res.status(400).json({ error: "Firebase UID is required" });
+    }
+    const adminEmails = ["krishnamoorthykavinash@gmail.com", "admin@kvnteapowder.com"];
+    const adminPhones = ["9787513911", "6383050287"];
+    const cleanEmail = email ? email.trim().toLowerCase() : "";
+    const cleanPhone = phone ? phone.replace(/\D/g, "").slice(-10) : "";
+    const isAdmin = adminEmails.includes(cleanEmail) || adminPhones.includes(cleanPhone);
+    const role = isAdmin ? "admin" : "customer";
+    const user = await serverDb.upsertFirebaseUser({
+      firebaseUid: uid,
+      email: cleanEmail,
+      phone: cleanPhone,
+      fullName: fullName || "Valued Customer",
+      authProvider: authProvider || "email",
+      emailVerified: Boolean(emailVerified),
+      phoneVerified: Boolean(phoneVerified),
+      initialAddress
+    });
+    const token = createToken({
+      userId: user.id,
+      phone: user.phone || "0000000000",
+      role
+    });
+    const { passwordHash: _, ...safeUser } = user;
+    return res.json({
+      message: "Authentication synchronized successfully",
+      user: { ...safeUser, role },
+      token,
+      isAdmin
+    });
+  } catch (err) {
+    console.error("Firebase sync error:", err);
+    return res.status(500).json({ error: "Failed to synchronize authentication" });
+  }
+});
+router.post("/auth/register", rateLimiter(10, 6e4), async (req, res) => {
   try {
     const { fullName, phone, password, email, initialAddress } = req.body;
     if (!fullName || fullName.trim().length < 2) {
@@ -1354,9 +1971,9 @@ router.delete("/auth/addresses/:id", authenticateCustomer, async (req, res) => {
     return res.status(500).json({ error: "Failed to delete address" });
   }
 });
-router.post("/orders", async (req, res) => {
+router.post("/orders", rateLimiter(15, 6e4), async (req, res) => {
   try {
-    const { customer, items, paymentMethod, notes } = req.body;
+    const { customer, items, paymentMethod, notes, addressId } = req.body;
     if (!customer) {
       return res.status(400).json({ error: "Customer and delivery details are required" });
     }
@@ -1383,9 +2000,33 @@ router.post("/orders", async (req, res) => {
       villageTown: customer.villageTown.trim(),
       pincode: customer.pincode.trim()
     };
+    let customerId = "GUEST";
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const payload = verifyToken(authHeader.slice(7));
+      if (payload && payload.userId) {
+        customerId = payload.userId;
+      }
+    }
+    const addressSnapshot = {
+      id: addressId || `snap-${Date.now()}`,
+      label: customer.label || "Home",
+      recipientName: cleanCustomer.fullName,
+      phone: cleanCustomer.phone,
+      addressLine: cleanCustomer.address,
+      landmark: cleanCustomer.landmark || "",
+      villageTown: cleanCustomer.villageTown,
+      district: cleanCustomer.district || "",
+      state: cleanCustomer.state || "Tamil Nadu",
+      pincode: cleanCustomer.pincode,
+      coordinates: cleanCustomer.coordinates,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
     const isOnlinePayment = paymentMethod === "Online" || paymentMethod === "ONLINE_UPI";
     const order = await serverDb.createOrder({
+      customerId,
       customer: cleanCustomer,
+      addressSnapshot,
       items: pricing.validatedItems,
       subtotal: pricing.subtotal,
       deliveryCharge: pricing.deliveryCharge,
@@ -1394,15 +2035,15 @@ router.post("/orders", async (req, res) => {
       paymentMethod: isOnlinePayment ? "ONLINE_UPI" : "COD",
       paymentStatus: isOnlinePayment ? "Paid" : "Pending",
       orderStatus: "Order Confirmed",
+      whatsappStatus: whatsappService.isConfigured() ? "pending" : "not_configured",
+      excelSyncStatus: excelSyncService.isConfigured() ? "pending" : "not_configured",
       notes: notes?.trim() || ""
     });
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      const payload = verifyToken(authHeader.slice(7));
-      if (payload && payload.userId) {
-        const addresses = await serverDb.getUserAddresses(payload.userId);
+    if (customerId !== "GUEST") {
+      try {
+        const addresses = await serverDb.getUserAddresses(customerId);
         if (addresses.length === 0) {
-          await serverDb.addAddress(payload.userId, {
+          await serverDb.addAddress(customerId, {
             label: "Home",
             recipientName: cleanCustomer.fullName,
             phone: cleanCustomer.phone,
@@ -1416,6 +2057,7 @@ router.post("/orders", async (req, res) => {
             coordinates: cleanCustomer.coordinates
           });
         }
+      } catch {
       }
     }
     try {
@@ -1424,6 +2066,42 @@ router.post("/orders", async (req, res) => {
       });
     } catch (err) {
       console.warn("Non-fatal webhook queue error:", err);
+    }
+    try {
+      whatsappService.sendOrderConfirmation(order).then((waRes) => {
+        serverDb.updateOrderSyncStatuses(order.id, {
+          whatsappStatus: waRes.status,
+          whatsappSentAt: waRes.sentAt,
+          whatsappError: waRes.error
+        }).catch(() => {
+        });
+      }).catch((err) => {
+        serverDb.updateOrderSyncStatuses(order.id, {
+          whatsappStatus: "failed",
+          whatsappError: err.message
+        }).catch(() => {
+        });
+      });
+    } catch (err) {
+      console.warn("Non-fatal WhatsApp dispatch notice:", err);
+    }
+    try {
+      excelSyncService.syncOrderToExcel(order).then((xlRes) => {
+        serverDb.updateOrderSyncStatuses(order.id, {
+          excelSyncStatus: xlRes.status,
+          excelSyncAt: xlRes.syncedAt,
+          excelError: xlRes.error
+        }).catch(() => {
+        });
+      }).catch((err) => {
+        serverDb.updateOrderSyncStatuses(order.id, {
+          excelSyncStatus: "failed",
+          excelError: err.message
+        }).catch(() => {
+        });
+      });
+    } catch (err) {
+      console.warn("Non-fatal Excel sync notice:", err);
     }
     return res.status(201).json({
       success: true,
@@ -1569,6 +2247,109 @@ router.get("/admin/stats", authenticateAdmin, async (_req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ error: "Failed to compute admin stats" });
+  }
+});
+router.get("/products", async (_req, res) => {
+  try {
+    const products = await serverDb.getAllProducts();
+    return res.json({ products });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load products" });
+  }
+});
+router.get("/products/:id", async (req, res) => {
+  try {
+    const product = await serverDb.getProductById(req.params.id);
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+    return res.json({ product });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load product" });
+  }
+});
+router.post("/admin/products", authenticateAdmin, async (req, res) => {
+  try {
+    const productData = req.body;
+    if (!productData.name || !productData.id) {
+      return res.status(400).json({ error: "Product ID and Name are required" });
+    }
+    const saved = await serverDb.saveProduct(productData);
+    return res.status(201).json({ success: true, product: saved });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to save product" });
+  }
+});
+router.delete("/admin/products/:id", authenticateAdmin, async (req, res) => {
+  try {
+    const success = await serverDb.deleteProduct(req.params.id);
+    if (!success) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+    return res.json({ success: true, message: "Product deleted" });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to delete product" });
+  }
+});
+router.get("/admin/whatsapp/status", authenticateAdmin, async (_req, res) => {
+  return res.json({
+    configured: whatsappService.isConfigured(),
+    phoneNumberIdConfigured: Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID),
+    accessTokenConfigured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
+    templateConfigured: Boolean(process.env.WHATSAPP_TEMPLATE_NAME)
+  });
+});
+router.get("/admin/excel/status", authenticateAdmin, async (_req, res) => {
+  const status = excelSyncService.getConfigurationStatus();
+  return res.json(status);
+});
+router.post("/admin/excel/sync", authenticateAdmin, async (_req, res) => {
+  try {
+    if (!excelSyncService.isConfigured()) {
+      return res.status(400).json({
+        error: "Microsoft Graph Excel credentials not configured. Please set MS_GRAPH_CLIENT_ID, MS_GRAPH_CLIENT_SECRET, MS_GRAPH_TENANT_ID, MS_EXCEL_DRIVE_ID, and MS_EXCEL_FILE_ID."
+      });
+    }
+    const orders = await serverDb.getAllOrders();
+    const unsynced = orders.filter((o) => o.excelSyncStatus !== "synced");
+    let syncedCount = 0;
+    let failedCount = 0;
+    for (const order of unsynced) {
+      const result = await excelSyncService.syncOrderToExcel(order);
+      await serverDb.updateOrderSyncStatuses(order.id, {
+        excelSyncStatus: result.status,
+        excelSyncAt: result.syncedAt,
+        excelError: result.error
+      });
+      if (result.success) syncedCount++;
+      else failedCount++;
+    }
+    return res.json({
+      success: true,
+      message: `Excel sync completed: ${syncedCount} synced, ${failedCount} failed`,
+      syncedCount,
+      failedCount,
+      totalProcessed: unsynced.length
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to execute Excel sync: " + err.message });
+  }
+});
+router.post("/admin/whatsapp/retry/:orderId", authenticateAdmin, async (req, res) => {
+  try {
+    const order = await serverDb.getOrderById(req.params.orderId);
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    const result = await whatsappService.sendOrderConfirmation(order);
+    await serverDb.updateOrderSyncStatuses(order.id, {
+      whatsappStatus: result.status,
+      whatsappSentAt: result.sentAt,
+      whatsappError: result.error
+    });
+    return res.json({ success: result.success, result });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to send WhatsApp message: " + err.message });
   }
 });
 app.use("/api", router);

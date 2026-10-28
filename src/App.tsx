@@ -39,7 +39,7 @@ import {
 } from 'lucide-react';
 
 function AppContent() {
-  const { config, toast, showToast, wishlist } = useShop();
+  const { config, toast, showToast, wishlist, products } = useShop();
 
   // Navigation page views
   const [currentPage, setCurrentPage] = useState<
@@ -74,6 +74,12 @@ function AppContent() {
     db.getProducts().filter((p) => p.status === 'published')
   );
   const [banners, setBanners] = useState(() => db.getBanners());
+
+  useEffect(() => {
+    if (products && products.length > 0) {
+      setAllProducts(products.filter((p) => p.status === 'published'));
+    }
+  }, [products]);
 
   useEffect(() => {
     const handleStoreUpdate = () => {

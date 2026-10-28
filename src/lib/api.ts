@@ -1,4 +1,4 @@
-import { Order, OrderCustomer, CartItem, CustomerAddress, CustomerUser, OrderStatus } from '../types';
+import { Order, OrderCustomer, CartItem, CustomerAddress, CustomerUser, OrderStatus, Product } from '../types';
 
 const API_BASE = '/api';
 
@@ -71,6 +71,23 @@ export const api = {
   },
 
   // 2. Customer Auth
+  async syncFirebaseAuth(data: {
+    uid: string;
+    email?: string;
+    phone?: string;
+    fullName: string;
+    authProvider: 'google' | 'phone' | 'email';
+    emailVerified?: boolean;
+    phoneVerified?: boolean;
+    initialAddress?: Partial<CustomerAddress>;
+  }): Promise<{ user: CustomerUser; token: string; isAdmin?: boolean }> {
+    return safeRequest<{ user: CustomerUser; token: string; isAdmin?: boolean }>(`${API_BASE}/auth/firebase-sync`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
   async register(data: {
     fullName: string;
     phone: string;
@@ -212,6 +229,61 @@ export const api = {
 
   async adminRetryWebhooks(token?: string): Promise<any> {
     return safeRequest<any>(`${API_BASE}/admin/webhooks/retry`, {
+      method: 'POST',
+      headers: getAdminHeaders(token),
+    });
+  },
+
+  // 5. Products
+  async getProducts(): Promise<Product[]> {
+    const json = await safeRequest<{ products: Product[] }>(`${API_BASE}/products`);
+    return json.products || [];
+  },
+
+  async getProduct(id: string): Promise<Product> {
+    const json = await safeRequest<{ product: Product }>(`${API_BASE}/products/${encodeURIComponent(id)}`);
+    return json.product;
+  },
+
+  async adminSaveProduct(token: string | undefined, product: Product): Promise<Product> {
+    const json = await safeRequest<{ product: Product }>(`${API_BASE}/admin/products`, {
+      method: 'POST',
+      headers: getAdminHeaders(token),
+      body: JSON.stringify(product),
+    });
+    return json.product;
+  },
+
+  async adminDeleteProduct(token: string | undefined, id: string): Promise<boolean> {
+    await safeRequest(`${API_BASE}/admin/products/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: getAdminHeaders(token),
+    });
+    return true;
+  },
+
+  // 6. WhatsApp & Microsoft Excel Sync
+  async adminGetWhatsAppStatus(token?: string): Promise<any> {
+    return safeRequest<any>(`${API_BASE}/admin/whatsapp/status`, {
+      headers: getAdminHeaders(token),
+    });
+  },
+
+  async adminRetryWhatsApp(token: string | undefined, orderId: string): Promise<any> {
+    return safeRequest<any>(`${API_BASE}/admin/whatsapp/retry/${encodeURIComponent(orderId)}`, {
+      method: 'POST',
+      headers: getAdminHeaders(token),
+    });
+  },
+
+  async adminGetExcelStatus(token?: string): Promise<any> {
+    return safeRequest<any>(`${API_BASE}/admin/excel/status`, {
+      headers: getAdminHeaders(token),
+    });
+  },
+
+  async adminSyncExcel(token?: string): Promise<any> {
+    return safeRequest<any>(`${API_BASE}/admin/excel/sync`, {
       method: 'POST',
       headers: getAdminHeaders(token),
     });

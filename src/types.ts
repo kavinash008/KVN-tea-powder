@@ -116,6 +116,11 @@ export interface CustomerUser {
   fullName: string;
   phone: string;
   email?: string;
+  authProvider?: 'password' | 'google' | 'phone' | 'email';
+  firebaseUid?: string;
+  emailVerified?: boolean;
+  phoneVerified?: boolean;
+  role?: 'customer' | 'admin';
   addresses: CustomerAddress[];
   createdAt: string;
   updatedAt?: string;
@@ -140,7 +145,9 @@ export interface OrderCustomer {
 export interface Order {
   id: string;
   orderNumber: string;
+  customerId?: string;
   customer: OrderCustomer;
+  addressSnapshot?: CustomerAddress;
   items: CartItem[];
   subtotal: number;
   deliveryCharge: number;
@@ -151,6 +158,12 @@ export interface Order {
   paymentStatus: 'Pending' | 'Paid' | 'Failed' | 'Refunded';
   orderStatus: OrderStatus;
   statusHistory: OrderStatusHistory[];
+  whatsappStatus?: 'pending' | 'sent' | 'failed' | 'not_configured';
+  whatsappSentAt?: string;
+  whatsappError?: string;
+  excelSyncStatus?: 'pending' | 'synced' | 'failed' | 'not_configured';
+  excelSyncAt?: string;
+  excelError?: string;
   notes?: string;
   createdAt: string;
   updatedAt: string;
