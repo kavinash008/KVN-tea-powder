@@ -9,10 +9,10 @@ import path from "path";
 // src/data/initialData.ts
 var INITIAL_BUSINESS_CONFIG = {
   name: "KVN TEAPOWDER",
-  owner: "KRISHNAMOORTHY",
-  primaryPhone: "9787513911",
-  secondaryPhone: "6383050287",
-  email: "krishnamoorthykavinash@gmail.com",
+  owner: "Kavinash",
+  primaryPhone: "6383050287",
+  secondaryPhone: "9787513911",
+  email: "kvnteapowder@gmail.com",
   defaultDeliveryCharge: 30,
   freeDeliveryThreshold: 500,
   fssaiNumber: "",
@@ -976,8 +976,8 @@ import crypto from "crypto";
 var JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET || "kvn-teapowder-production-secret-key-2026";
 var ADMIN_PASSCODES = [
   (process.env.ADMIN_PASSWORD || "kavin008").trim(),
-  "9787513911",
-  "6383050287"
+  "6383050287",
+  "9787513911"
 ];
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");
@@ -1023,7 +1023,7 @@ function verifyAdminPasscode(passcode) {
   return ADMIN_PASSCODES.includes(clean);
 }
 function createAdminToken() {
-  return createToken({ userId: "admin", phone: "9787513911", role: "admin" });
+  return createToken({ userId: "admin", phone: "6383050287", role: "admin" });
 }
 function verifyAdminToken(token) {
   const payload = verifyToken(token);
@@ -1770,8 +1770,8 @@ router.post("/auth/firebase-sync", rateLimiter(20, 6e4), async (req, res) => {
     if (!uid) {
       return res.status(400).json({ error: "Firebase UID is required" });
     }
-    const adminEmails = ["krishnamoorthykavinash@gmail.com", "admin@kvnteapowder.com"];
-    const adminPhones = ["9787513911", "6383050287"];
+    const adminEmails = ["kvnteapowder@gmail.com", "admin@kvnteapowder.com"];
+    const adminPhones = ["6383050287", "9787513911"];
     const cleanEmail = email ? email.trim().toLowerCase() : "";
     const cleanPhone = phone ? phone.replace(/\D/g, "").slice(-10) : "";
     const isAdmin = adminEmails.includes(cleanEmail) || adminPhones.includes(cleanPhone);

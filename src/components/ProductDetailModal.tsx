@@ -64,7 +64,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
   const whatsappMsg = encodeURIComponent(
     `Hello KVN TEAPOWDER, I would like to order ${quantity} unit(s) of ${product.name} (${selectedVariant.weight}) for ₹${selectedVariant.sellingPrice * quantity}.`
   );
-  const whatsappUrl = `https://wa.me/91${config.primaryPhone || '9787513911'}?text=${whatsappMsg}`;
+  const whatsappUrl = `https://wa.me/91${config.primaryPhone || '6383050287'}?text=${whatsappMsg}`;
 
   return (
     <div 

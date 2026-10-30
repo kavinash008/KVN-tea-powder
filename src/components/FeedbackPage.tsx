@@ -51,7 +51,7 @@ export const FeedbackPage: React.FC = () => {
           Customer Experiences
         </span>
         <h1 className="text-2xl sm:text-3xl font-bold text-stone-900 mt-1 mb-2">
-          Your Feedback Matters to Krishnamoorthy
+          Your Feedback Matters to Kavinash
         </h1>
         <p className="text-xs sm:text-sm text-stone-600">
           We pride ourselves on fresh aroma, brisk strength, and pure taste. Share your experience with KVN TEAPOWDER or suggest how we can serve your family better.

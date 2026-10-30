@@ -299,7 +299,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
               Store Management
             </h1>
             <p className="text-[10px] sm:text-[11px] text-emerald-200/80 mt-0.5 truncate hidden xs:block">
-              Proprietor: {config?.owner || 'KRISHNAMOORTHY'}
+              Proprietor: {config?.owner || 'Kavinash'}
             </p>
           </div>
         </div>

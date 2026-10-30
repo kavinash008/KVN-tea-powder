@@ -272,7 +272,7 @@ export const db = {
           </tfoot>
         </table>
         <p style="margin-top: 24px; font-size: 12px; color: #666;">
-          KVN TEAPOWDER Store System | Owner: Krishnamoorthy (9787513911 / 6383050287)
+          KVN TEAPOWDER Store System | Owner: Kavinash (6383050287 / 9787513911)
         </p>
       </div>
     `;

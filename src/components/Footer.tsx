@@ -54,7 +54,7 @@ export const Footer: React.FC<FooterProps> = ({ config: propConfig, onNavigate, 
                 { id: 'tea', label: 'Tea Powders' },
                 { id: 'coffee', label: 'Coffee Powders' },
                 { id: 'new-arrivals', label: 'New Arrivals' },
-                { id: 'about', label: 'About Krishnamoorthy' },
+                { id: 'about', label: 'About Kavinash' },
               ].map((item) => (
                 <li key={item.id}>
                   <button

@@ -98,7 +98,7 @@ export const OrderTracking: React.FC<OrderTrackingProps> = ({ initialOrderId, on
           <AlertCircle className="w-10 h-10 text-stone-400 mx-auto mb-2" />
           <h3 className="font-semibold text-stone-800 text-sm">No Order Found</h3>
           <p className="text-xs text-stone-500 mt-1 max-w-sm mx-auto">
-            Please check the Order ID or phone number, or reach out to Krishnamoorthy on WhatsApp at 9787513911.
+            Please check the Order ID or phone number, or reach out to Kavinash on WhatsApp at 6383050287 / 9787513911.
           </p>
         </div>
       )}

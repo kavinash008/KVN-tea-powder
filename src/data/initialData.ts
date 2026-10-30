@@ -2,10 +2,10 @@ import { Product, Category, Banner, DeliveryArea, Coupon, BusinessConfig } from 
 
 export const INITIAL_BUSINESS_CONFIG: BusinessConfig = {
   name: 'KVN TEAPOWDER',
-  owner: 'KRISHNAMOORTHY',
-  primaryPhone: '9787513911',
-  secondaryPhone: '6383050287',
-  email: 'krishnamoorthykavinash@gmail.com',
+  owner: 'Kavinash',
+  primaryPhone: '6383050287',
+  secondaryPhone: '9787513911',
+  email: 'kvnteapowder@gmail.com',
   defaultDeliveryCharge: 30,
   freeDeliveryThreshold: 500,
   fssaiNumber: '',
@@ -189,7 +189,7 @@ export const INITIAL_BANNERS: Banner[] = [
   {
     id: 'banner-1',
     title: 'Goodness in Every Sip',
-    subtitle: 'Freshly grounded Nilgiri tea leaves & artisanal South Indian filter coffee directly from Krishnamoorthy.',
+    subtitle: 'Freshly grounded Nilgiri tea leaves & artisanal South Indian filter coffee directly from Kavinash.',
     imageUrl: 'https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=1600&q=80',
     buttonText: 'Explore Tea Powders',
     linkUrl: '/tea',

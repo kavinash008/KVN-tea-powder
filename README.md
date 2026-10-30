@@ -1,6 +1,6 @@
 # 🌿 KVN TEAPOWDER — Official Online Store & Admin Portal
 
-> Authentic Nilgiri Tea Blends & Traditional South Indian Filter Coffee Powders. Handcrafted and blended with love in Tamil Nadu by **Krishnamoorthy**.
+> Authentic Nilgiri Tea Blends & Traditional South Indian Filter Coffee Powders. Handcrafted and blended with love in Tamil Nadu by **Kavinash**.
 
 ---
 
@@ -10,7 +10,7 @@
 
 * **Customer Storefront**: Browse authentic Nilgiri teas, strong filter coffee blends, and family combos with multiple weight variants (250g, 500g, 1kg), smart cart, saved delivery addresses, device GPS auto-fill, and instant order placement.
 * **Customer Account**: Secure customer registration and login with encrypted passwords, saved address book (Home, Work), and complete personal order history.
-* **Private Admin Portal**: Protected management dashboard for Krishnamoorthy to manage orders in real-time across all customer devices, update delivery lifecycles (`Order Confirmed` ➔ `Processing` ➔ `Dispatched` ➔ `Delivered`), add products, and manage live inventory.
+* **Private Admin Portal**: Protected management dashboard for Kavinash to manage orders in real-time across all customer devices, update delivery lifecycles (`Order Confirmed` ➔ `Processing` ➔ `Dispatched` ➔ `Delivered`), add products, and manage live inventory.
 
 ---
 
@@ -40,7 +40,7 @@
   * **Direct URL**: Navigate to `/#admin` (e.g. `https://kvnteapowder.vercel.app/#admin`).
   * **Keyboard Shortcut**: Press `Ctrl` + `Alt` + `A` (or `Cmd` + `Alt` + `A`).
   * **Discreet Footer Lock**: Click the subtle lock `🔒` icon in the footer.
-* **Passcode Protected**: Secure admin authentication via `POST /api/admin/login` (passcode: `kavin008` or registered phone `9787513911`).
+* **Passcode Protected**: Secure admin authentication via `POST /api/admin/login` (passcode: `kavin008` or registered phone `6383050287` / `9787513911`).
 * **Live Order Stream**: 15-second automatic polling and manual sync button to review new customer orders instantly.
 * **Order Lifecycle Controls**: Update statuses (`Order Confirmed`, `Processing`, `Dispatched`, `Out for Delivery`, `Delivered`, `Cancelled`) with automatic status history logging.
 
@@ -92,7 +92,7 @@ npm run build
 | :--- | :--- |
 | `MONGODB_URI` | MongoDB Atlas connection string (`mongodb+srv://...`) |
 | `MONGODB_DB_NAME` | Database name (e.g. `kvn_store`) |
-| `ADMIN_PASSWORD` | Passcode for Krishnamoorthy to log into the Admin Dashboard (`kavin008`) |
+| `ADMIN_PASSWORD` | Passcode for Kavinash to log into the Admin Dashboard (`kavin008`) |
 | `JWT_SECRET` | Secret key for signing customer and admin session tokens |
 
 ---
@@ -100,8 +100,8 @@ npm run build
 ## 📞 Contact & Business Information
 
 * **Brand**: KVN TEAPOWDER
-* **Proprietor**: Krishnamoorthy
-* **Primary Orders**: +91 9787513911
-* **Secondary Orders**: +91 6383050287
-* **Email**: krishnamoorthykavinash@gmail.com
+* **Proprietor**: Kavinash
+* **Primary Orders**: +91 6383050287
+* **Secondary Orders**: +91 9787513911
+* **Email**: kvnteapowder@gmail.com
 * **Origin**: Direct estate-blended tea & coffee in Tamil Nadu, India.

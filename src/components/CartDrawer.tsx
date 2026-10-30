@@ -51,7 +51,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
     .map((item) => `• ${item.productName} (${item.weight}) x ${item.quantity} = ₹${item.unitPrice * item.quantity}`)
     .join('%0A');
   const whatsappMsg = `Hello KVN TEAPOWDER, I would like to place an order:%0A%0A${whatsappItemList}%0A%0A*Subtotal:* ₹${cartSubtotal}%0A*Delivery:* ₹${deliveryCharge}%0A*Total:* ₹${finalTotal}%0A%0APlease confirm availability and delivery details.`;
-  const whatsappUrl = `https://wa.me/91${config.primaryPhone || '9787513911'}?text=${whatsappMsg}`;
+  const whatsappUrl = `https://wa.me/91${config.primaryPhone || '6383050287'}?text=${whatsappMsg}`;
 
   return (
     <div 

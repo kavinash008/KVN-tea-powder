@@ -33,7 +33,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
   const isWishlisted = isInWishlist(product.id);
 
   // WhatsApp quick inquiry/order link
-  const whatsappNumber = config.primaryPhone || '9787513911';
+  const whatsappNumber = config.primaryPhone || '6383050287';
   const whatsappMsg = encodeURIComponent(
     `Hello KVN TEAPOWDER, I would like to order ${product.name} (${selectedVariant.weight}) for ₹${selectedVariant.sellingPrice}.`
   );

@@ -19,7 +19,7 @@ export const OrderConfirmation: React.FC<OrderConfirmationProps> = ({
   const whatsappMsg = encodeURIComponent(
     `Hello KVN TEAPOWDER, I just placed order ${order.orderNumber} for ₹${order.totalAmount}. Please confirm when packing begins.`
   );
-  const whatsappUrl = `https://wa.me/91${config.primaryPhone || '9787513911'}?text=${whatsappMsg}`;
+  const whatsappUrl = `https://wa.me/91${config.primaryPhone || '6383050287'}?text=${whatsappMsg}`;
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-12 sm:py-16 animate-in fade-in duration-300">
@@ -33,7 +33,7 @@ export const OrderConfirmation: React.FC<OrderConfirmationProps> = ({
           Order Placed Successfully!
         </h1>
         <p className="text-sm text-stone-600 max-w-md mx-auto mb-6">
-          Thank you for ordering with <strong>KVN TEAPOWDER</strong>. Krishnamoorthy has received your order and will prepare fresh packaging shortly.
+          Thank you for ordering with <strong>KVN TEAPOWDER</strong>. Kavinash has received your order and will prepare fresh packaging shortly.
         </p>
 
         {/* Order Details Card */}

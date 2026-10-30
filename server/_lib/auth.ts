@@ -3,8 +3,8 @@ import crypto from 'crypto';
 const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_JWT_SECRET || 'kvn-teapowder-production-secret-key-2026';
 const ADMIN_PASSCODES = [
   (process.env.ADMIN_PASSWORD || 'kavin008').trim(),
-  '9787513911',
   '6383050287',
+  '9787513911',
 ];
 
 /**
@@ -76,7 +76,7 @@ export function verifyAdminPasscode(passcode: string): boolean {
  * Create an admin session token.
  */
 export function createAdminToken(): string {
-  return createToken({ userId: 'admin', phone: '9787513911', role: 'admin' });
+  return createToken({ userId: 'admin', phone: '6383050287', role: 'admin' });
 }
 
 /**

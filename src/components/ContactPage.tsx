@@ -42,7 +42,7 @@ export const ContactPage: React.FC = () => {
           Contact KVN TEAPOWDER
         </h1>
         <p className="text-xs sm:text-sm text-stone-600">
-          Have a question about our tea leaf selections, South Indian filter coffee blends, wholesale hotel distribution, or village delivery? Get in touch directly with Krishnamoorthy.
+          Have a question about our tea leaf selections, South Indian filter coffee blends, wholesale hotel distribution, or village delivery? Get in touch directly with Kavinash.
         </p>
       </div>
 
@@ -64,7 +64,7 @@ export const ContactPage: React.FC = () => {
                 <User className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
                 <div>
                   <div className="font-semibold text-white">Owner & Operator</div>
-                  <div className="text-sm font-bold text-amber-200 uppercase">{config?.owner || 'KRISHNAMOORTHY'}</div>
+                  <div className="text-sm font-bold text-amber-200 uppercase">{config?.owner || 'Kavinash'}</div>
                 </div>
               </div>
 
@@ -72,11 +72,11 @@ export const ContactPage: React.FC = () => {
                 <Phone className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
                 <div>
                   <div className="font-semibold text-white">Direct Phone Numbers</div>
-                  <a href={`tel:${config?.primaryPhone || '9787513911'}`} className="block hover:underline text-sm font-medium">
-                    +91 {config?.primaryPhone || '9787513911'} (Primary)
+                  <a href={`tel:${config?.primaryPhone || '6383050287'}`} className="block hover:underline text-sm font-medium">
+                    +91 {config?.primaryPhone || '6383050287'} (Primary)
                   </a>
-                  <a href={`tel:${config?.secondaryPhone || '6383050287'}`} className="block hover:underline text-stone-300">
-                    +91 {config?.secondaryPhone || '6383050287'} (Additional)
+                  <a href={`tel:${config?.secondaryPhone || '9787513911'}`} className="block hover:underline text-stone-300">
+                    +91 {config?.secondaryPhone || '9787513911'} (Additional)
                   </a>
                 </div>
               </div>
@@ -85,8 +85,8 @@ export const ContactPage: React.FC = () => {
                 <Mail className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
                 <div>
                   <div className="font-semibold text-white">Official Business Email</div>
-                  <a href={`mailto:${config?.email || 'krishnamoorthykavinash@gmail.com'}`} className="hover:underline break-all text-stone-300">
-                    {config?.email || 'krishnamoorthykavinash@gmail.com'}
+                  <a href={`mailto:${config?.email || 'kvnteapowder@gmail.com'}`} className="hover:underline break-all text-stone-300">
+                    {config?.email || 'kvnteapowder@gmail.com'}
                   </a>
                 </div>
               </div>
@@ -104,7 +104,7 @@ export const ContactPage: React.FC = () => {
 
             <div className="pt-4 border-t border-[#2a5940]">
               <a
-                href={`https://wa.me/91${config.primaryPhone}?text=Hello%20Krishnamoorthy,%20I%20have%20an%20enquiry%20regarding%20KVN%20TEAPOWDER.`}
+                href={`https://wa.me/91${config.primaryPhone}?text=Hello%20Kavinash,%20I%20have%20an%20enquiry%20regarding%20KVN%20TEAPOWDER.`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="w-full py-3 bg-[#25D366] text-white font-semibold text-xs rounded-xl hover:bg-[#20ba59] transition-all flex items-center justify-center gap-2 shadow-xs"
@@ -131,7 +131,7 @@ export const ContactPage: React.FC = () => {
               </div>
               <h3 className="text-xl font-bold text-stone-900 mb-2">Message Sent Successfully!</h3>
               <p className="text-xs text-stone-600 max-w-sm mx-auto mb-6">
-                Your message has been delivered to <strong>{config.email}</strong> and registered in our communications inbox. Krishnamoorthy will respond shortly.
+                Your message has been delivered to <strong>{config.email}</strong> and registered in our communications inbox. Kavinash will respond shortly.
               </p>
               <button
                 onClick={() => {
@@ -226,7 +226,7 @@ export const ContactPage: React.FC = () => {
                 type="submit"
                 className="w-full py-3.5 bg-[#143728] text-white font-bold text-xs rounded-xl hover:bg-[#204e37] transition-all flex items-center justify-center gap-2 shadow-xs"
               >
-                <Send className="w-4 h-4" /> Send Enquiry to Krishnamoorthy
+                <Send className="w-4 h-4" /> Send Enquiry to Kavinash
               </button>
 
               <p className="text-[11px] text-stone-400 text-center">

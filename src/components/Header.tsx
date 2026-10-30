@@ -128,10 +128,19 @@ export const Header: React.FC<HeaderProps> = ({
               <Phone className="w-3 h-3 text-[#c29958] shrink-0" />
               <span className="text-stone-300 hidden xs:inline">Orders:</span>
               <a
-                href={`tel:${config?.primaryPhone || '9787513911'}`}
+                href={`tel:${config?.primaryPhone || '6383050287'}`}
                 className="hover:underline font-semibold text-[#f7e6c4]"
+                title="Primary Contact"
               >
-                {config?.primaryPhone || '9787513911'}
+                {config?.primaryPhone || '6383050287'}
+              </a>
+              <span className="text-stone-400 hidden sm:inline">/</span>
+              <a
+                href={`tel:${config?.secondaryPhone || '9787513911'}`}
+                className="hover:underline text-stone-300 hidden sm:inline"
+                title="Secondary Contact"
+              >
+                {config?.secondaryPhone || '9787513911'}
               </a>
             </span>
           </div>
@@ -139,7 +148,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Right WhatsApp fast link */}
           <div className="flex items-center shrink-0">
             <a
-              href={`https://wa.me/91${config?.primaryPhone || '9787513911'}?text=Hello%20KVN%20TEAPOWDER`}
+              href={`https://wa.me/91${config?.primaryPhone || '6383050287'}?text=Hello%20KVN%20TEAPOWDER`}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 bg-[#25D366]/20 text-[#c7f4d4] px-2 py-0.5 rounded text-[10px] sm:text-[11px] hover:bg-[#25D366]/30 transition-all font-medium"
@@ -383,9 +392,9 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* Quick Contact & WhatsApp banner */}
           <div className="pt-2 border-t border-stone-200/80 flex items-center justify-between text-xs text-stone-600">
-            <span className="text-[11px]">Direct Support: <strong>{config?.primaryPhone || '9787513911'}</strong></span>
+            <span className="text-[11px]">Direct Support: <a href={`tel:${config?.primaryPhone || '6383050287'}`} className="hover:underline"><strong>{config?.primaryPhone || '6383050287'}</strong></a> / <a href={`tel:${config?.secondaryPhone || '9787513911'}`} className="hover:underline">{config?.secondaryPhone || '9787513911'}</a></span>
             <a
-              href={`https://wa.me/91${config?.primaryPhone || '9787513911'}?text=Hello%20KVN%20TEAPOWDER`}
+              href={`https://wa.me/91${config?.primaryPhone || '6383050287'}?text=Hello%20KVN%20TEAPOWDER`}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-[#2e5e43] font-bold text-[11px] hover:underline"

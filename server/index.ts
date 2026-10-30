@@ -125,8 +125,8 @@ router.post('/auth/firebase-sync', rateLimiter(20, 60000), async (req: Request, 
       return res.status(400).json({ error: 'Firebase UID is required' });
     }
 
-    const adminEmails = ['krishnamoorthykavinash@gmail.com', 'admin@kvnteapowder.com'];
-    const adminPhones = ['9787513911', '6383050287'];
+    const adminEmails = ['kvnteapowder@gmail.com', 'admin@kvnteapowder.com'];
+    const adminPhones = ['6383050287', '9787513911'];
 
     const cleanEmail = email ? email.trim().toLowerCase() : '';
     const cleanPhone = phone ? phone.replace(/\D/g, '').slice(-10) : '';

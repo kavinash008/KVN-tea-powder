@@ -213,17 +213,17 @@ function AppContent() {
       if (rememberAdmin) {
         localStorage.setItem('kvn_admin_session', 'active');
       }
-      showToast('Welcome Krishnamoorthy! Admin access granted.');
+      showToast('Welcome Kavinash! Admin access granted.');
       return;
     } catch (err: any) {
       // Fallback check if server endpoint failed or unreachable
-      if (cleanPassword === 'kavin008' || cleanPassword === '9787513911' || cleanPassword === '6383050287') {
+      if (cleanPassword === 'kavin008' || cleanPassword === '6383050287' || cleanPassword === '9787513911') {
         localStorage.setItem('kvn_admin_token', cleanPassword);
         setIsAdminLoggedIn(true);
         if (rememberAdmin) {
           localStorage.setItem('kvn_admin_session', 'active');
         }
-        showToast('Welcome Krishnamoorthy! Admin access granted.');
+        showToast('Welcome Kavinash! Admin access granted.');
         return;
       }
       setAdminAuthError(err.message || 'Invalid administrator passcode. Please try again.');
@@ -298,7 +298,7 @@ function AppContent() {
                 Owner Portal Access
               </h2>
               <p className="text-xs text-stone-300 mt-1.5 leading-relaxed">
-                Restricted to business proprietor <strong>Krishnamoorthy</strong> & authorized operators.
+                Restricted to business proprietor <strong>Kavinash</strong> & authorized operators.
               </p>
             </div>
 
@@ -468,7 +468,7 @@ function AppContent() {
                 </div>
                 <h3 className="font-bold text-sm text-stone-900">7-Day Taste Guarantee</h3>
                 <p className="text-xs text-stone-600 leading-relaxed">
-                  If the taste, decoction strength, or aroma does not meet your household expectations, contact Krishnamoorthy directly at 9787513911 for an instant replacement or refund.
+                  If the taste, decoction strength, or aroma does not meet your household expectations, contact Kavinash directly at 6383050287 (or alternate: 9787513911) for an instant replacement or refund.
                 </p>
               </div>
             </div>
@@ -557,7 +557,7 @@ function AppContent() {
                     </h1>
 
                     <p className="text-xs sm:text-base text-stone-200/90 max-w-xl mx-auto lg:mx-0 leading-relaxed">
-                      Small-batch, natural aroma blends crafted by <strong>Krishnamoorthy</strong>. Free from synthetic dyes, chemical flavors, or filler stalks.
+                      Small-batch, natural aroma blends crafted by <strong>Kavinash</strong>. Free from synthetic dyes, chemical flavors, or filler stalks.
                     </p>
 
                     {/* Trust Badges */}
@@ -589,7 +589,7 @@ function AppContent() {
                       </button>
 
                       <a
-                        href={`https://wa.me/91${config.primaryPhone}?text=Hello%20Krishnamoorthy,%20I%20would%20like%20to%20order%20KVN%20TEAPOWDER.`}
+                        href={`https://wa.me/91${config.primaryPhone}?text=Hello%20Kavinash,%20I%20would%20like%20to%20order%20KVN%20TEAPOWDER.`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="w-full sm:w-auto px-6 py-3.5 bg-white/10 hover:bg-white/15 active:scale-95 text-white border border-white/20 font-semibold text-xs sm:text-sm rounded-xl transition-all flex items-center justify-center gap-2"
@@ -792,7 +792,7 @@ function AppContent() {
                       Behind KVN TEAPOWDER
                     </span>
                     <h2 className="text-2xl sm:text-4xl font-bold font-serif-brand text-stone-100">
-                      Crafted by Krishnamoorthy with Love for Authentic Flavor.
+                      Crafted by Kavinash with Love for Authentic Flavor.
                     </h2>
                     <p className="text-xs sm:text-sm text-stone-200/90 leading-relaxed">
                       "In an era where commercial store shelves are filled with dusty floor sweeps and artificial color additives, <strong>KVN TEAPOWDER</strong> was started with a single promise: bring fresh, unadulterated Nilgiri tea leaves and genuine roasted coffee seeds directly to our local households."
@@ -802,11 +802,13 @@ function AppContent() {
                     </p>
 
                     <div className="pt-3 flex flex-wrap gap-3 sm:gap-4 text-xs font-semibold text-amber-200">
-                      <div>Owner: KRISHNAMOORTHY</div>
+                      <div>Owner: Kavinash</div>
                       <div>•</div>
-                      <div>Primary Contact: 9787513911</div>
+                      <div>Primary Contact: <a href="tel:6383050287" className="hover:underline">6383050287</a></div>
                       <div>•</div>
-                      <div className="break-all">Email: krishnamoorthykavinash@gmail.com</div>
+                      <div>Secondary Contact: <a href="tel:9787513911" className="hover:underline">9787513911</a></div>
+                      <div>•</div>
+                      <div className="break-all">Email: <a href="mailto:kvnteapowder@gmail.com" className="hover:underline">kvnteapowder@gmail.com</a></div>
                     </div>
                   </div>
 
@@ -816,17 +818,17 @@ function AppContent() {
                         KVN
                       </div>
                       <div>
-                        <h4 className="font-bold text-white text-base uppercase">Krishnamoorthy</h4>
+                        <h4 className="font-bold text-white text-base uppercase">Kavinash</h4>
                         <span className="text-xs text-emerald-200">Founder & Tea Blender</span>
                       </div>
                       <p className="text-xs text-stone-300 italic">
-                        "If you are ever dissatisfied with the flavor of our tea, call me directly at 9787513911."
+                        "If you are ever dissatisfied with the flavor of our tea, call me directly at 6383050287 or 9787513911."
                       </p>
                       <button
                         onClick={() => navigateTo('contact')}
                         className="w-full py-2.5 bg-white text-[#143728] font-bold text-xs rounded-xl hover:bg-stone-100 transition-all cursor-pointer"
                       >
-                        Contact Krishnamoorthy
+                        Contact Kavinash
                       </button>
                     </div>
                   </div>
