@@ -1873,6 +1873,46 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
   );
 };
 
+// Helper to compress local images if Cloudinary credentials are not configured yet (<30KB)
+function compressImageFile(file: File, maxDimension = 500, quality = 0.6): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = document.createElement('img');
+      img.onload = () => {
+        let width = img.width;
+        let height = img.height;
+        if (width > height) {
+          if (width > maxDimension) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          }
+        } else {
+          if (height > maxDimension) {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(e.target?.result as string);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => resolve(e.target?.result as string);
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 // Subcomponent: Dedicated Product Form Modal with Direct Image Upload & Variants
 interface ProductFormModalProps {
   product: Product | null;
@@ -1901,6 +1941,11 @@ const ProductFormModal: React.FC<ProductFormModalProps> = ({
   const [isNewArrival, setIsNewArrival] = useState(product?.isNewArrival !== undefined ? product.isNewArrival : true);
   const [status, setStatus] = useState<'published' | 'draft' | 'archived'>(product?.status || 'published');
 
+  // Image Upload State
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState('');
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
   // Weight variants
   const [variants, setVariants] = useState<any[]>(
     product?.variants && product.variants.length > 0
@@ -1911,19 +1956,59 @@ const ProductFormModal: React.FC<ProductFormModalProps> = ({
         ]
   );
 
-  // File upload handler (direct from device)
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Direct Cloudinary Upload handler (with client-side optimization fallback)
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (files && files.length > 0) {
-      const file = files[0];
-      const reader = new FileReader();
-      reader.onload = (uploadEvent) => {
-        const base64Url = uploadEvent.target?.result as string;
-        if (base64Url) {
-          setImages((prev) => [base64Url, ...prev]);
+    if (!files || files.length === 0) return;
+
+    setIsUploading(true);
+    setUploadStatus('Checking Cloudinary storage...');
+    setUploadError(null);
+
+    try {
+      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+      const signData = await api.getCloudinarySignature(token);
+
+      if (signData.configured && signData.cloudName && signData.apiKey && signData.signature && signData.timestamp && signData.folder) {
+        const uploadedUrls: string[] = [];
+
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          setUploadStatus(`Uploading image ${i + 1} of ${files.length} to Cloudinary...`);
+          const cloudRes = await api.uploadToCloudinary(file, {
+            cloudName: signData.cloudName,
+            apiKey: signData.apiKey,
+            timestamp: signData.timestamp,
+            folder: signData.folder,
+            signature: signData.signature,
+          });
+          if (cloudRes.secure_url) {
+            uploadedUrls.push(cloudRes.secure_url);
+          }
         }
-      };
-      reader.readAsDataURL(file);
+
+        setImages((prev) => [...uploadedUrls, ...prev]);
+        setUploadStatus('');
+      } else {
+        setUploadStatus(`Optimizing ${files.length} image(s)...`);
+        const localCompressed: string[] = [];
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          const compressed = await compressImageFile(file, 500, 0.6);
+          localCompressed.push(compressed);
+        }
+        setImages((prev) => [...localCompressed, ...prev]);
+        setUploadStatus('');
+        setUploadError(
+          'Cloudinary is not configured in Vercel. Image was compressed (<30KB) to prevent payload limits. For full-resolution CDN hosting, set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET in Vercel.'
+        );
+      }
+    } catch (err: any) {
+      console.error('Image upload failed:', err);
+      setUploadError(err.message || 'Image upload failed. You can paste an image URL directly instead.');
+    } finally {
+      setIsUploading(false);
+      e.target.value = '';
     }
   };
 
@@ -2046,12 +2131,35 @@ const ProductFormModal: React.FC<ProductFormModalProps> = ({
               ))}
 
               {/* Upload button from computer/mobile */}
-              <label className="w-20 h-20 border-2 border-dashed border-stone-300 hover:border-[#2e5e43] rounded-xl flex flex-col items-center justify-center cursor-pointer text-stone-500 hover:text-[#2e5e43] transition-colors">
-                <Upload className="w-5 h-5 mb-1" />
-                <span className="text-[10px] font-semibold">Upload</span>
-                <input type="file" accept="image/*" onChange={handleFileUpload} className="hidden" />
+              <label className={`w-20 h-20 border-2 border-dashed border-stone-300 hover:border-[#2e5e43] rounded-xl flex flex-col items-center justify-center cursor-pointer text-stone-500 hover:text-[#2e5e43] transition-colors ${isUploading ? 'opacity-50 pointer-events-none' : ''}`}>
+                {isUploading ? (
+                  <Loader2 className="w-5 h-5 mb-1 animate-spin text-[#2e5e43]" />
+                ) : (
+                  <Upload className="w-5 h-5 mb-1" />
+                )}
+                <span className="text-[10px] font-semibold">{isUploading ? 'Uploading...' : 'Upload'}</span>
+                <input type="file" accept="image/*" multiple onChange={handleFileUpload} className="hidden" disabled={isUploading} />
               </label>
             </div>
+
+            {/* Upload progress indicator */}
+            {isUploading && (
+              <div className="flex items-center gap-2 p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-semibold animate-pulse">
+                <Loader2 className="w-4 h-4 animate-spin text-emerald-600 shrink-0" />
+                <span>{uploadStatus || 'Uploading image(s)...'}</span>
+              </div>
+            )}
+
+            {/* Storage configuration / Notice banner */}
+            {uploadError && (
+              <div className="p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs space-y-1">
+                <div className="font-bold flex items-center gap-1.5">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>Image Storage Notice</span>
+                </div>
+                <div className="leading-relaxed">{uploadError}</div>
+              </div>
+            )}
 
             {/* URL alternative */}
             <div className="flex gap-2 pt-1">
@@ -2059,7 +2167,7 @@ const ProductFormModal: React.FC<ProductFormModalProps> = ({
                 type="url"
                 value={imageUrlInput}
                 onChange={(e) => setImageUrlInput(e.target.value)}
-                placeholder="Or paste image URL (Unsplash, etc.)"
+                placeholder="Or paste image URL (Cloudinary, Unsplash, etc.)"
                 className="flex-1 px-3 py-1.5 bg-white border border-stone-200 rounded-lg text-xs"
               />
               <button

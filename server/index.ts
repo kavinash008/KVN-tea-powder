@@ -1,4 +1,5 @@
 import express, { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import { serverDb } from './_lib/db';
 import {
   hashPassword,
@@ -733,6 +734,37 @@ router.get('/products/:id', async (req: Request, res: Response) => {
   }
 });
 
+// Admin: Cloudinary Signed Upload Signature Generator
+const handleCloudinarySign = (req: Request, res: Response) => {
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  const folder = process.env.CLOUDINARY_FOLDER || 'kvn_products';
+
+  if (!cloudName || !apiKey || !apiSecret) {
+    return res.json({
+      configured: false,
+      message: 'Cloudinary environment variables (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET) are not configured in Vercel.',
+    });
+  }
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const toSign = `folder=${folder}&timestamp=${timestamp}${apiSecret}`;
+  const signature = crypto.createHash('sha1').update(toSign).digest('hex');
+
+  return res.json({
+    configured: true,
+    cloudName,
+    apiKey,
+    folder,
+    timestamp,
+    signature,
+  });
+};
+
+router.get('/admin/cloudinary-sign', authenticateAdmin, handleCloudinarySign);
+router.post('/admin/cloudinary-sign', authenticateAdmin, handleCloudinarySign);
+
 // Admin: Create Product (POST)
 router.post('/admin/products', authenticateAdmin, async (req: Request, res: Response) => {
   try {
@@ -740,6 +772,18 @@ router.post('/admin/products', authenticateAdmin, async (req: Request, res: Resp
     if (!productData || !productData.name || !productData.name.trim()) {
       return res.status(400).json({ error: 'Product name is required' });
     }
+
+    // Reject oversized raw Base64 image data to prevent database and network bloat
+    if (Array.isArray(productData.images)) {
+      for (const img of productData.images) {
+        if (typeof img === 'string' && img.startsWith('data:image/') && img.length > 200000) {
+          return res.status(400).json({
+            error: 'Oversized Base64 image detected (>150KB). Please upload images via Cloudinary or supply hosted HTTPS image URLs.',
+          });
+        }
+      }
+    }
+
     const saved = await serverDb.saveProduct(productData);
     return res.status(201).json({ success: true, product: saved });
   } catch (err: any) {
@@ -755,6 +799,18 @@ router.put('/admin/products/:id', authenticateAdmin, async (req: Request, res: R
     if (!productData) {
       return res.status(400).json({ error: 'Product data is required' });
     }
+
+    // Reject oversized raw Base64 image data to prevent database and network bloat
+    if (Array.isArray(productData.images)) {
+      for (const img of productData.images) {
+        if (typeof img === 'string' && img.startsWith('data:image/') && img.length > 200000) {
+          return res.status(400).json({
+            error: 'Oversized Base64 image detected (>150KB). Please upload images via Cloudinary or supply hosted HTTPS image URLs.',
+          });
+        }
+      }
+    }
+
     const updated = await serverDb.updateProduct(id, productData);
     if (!updated) {
       return res.status(404).json({ error: 'Product not found' });
@@ -903,8 +959,13 @@ app.use((req: Request, res: Response) => {
 
 // Global Express error handler to prevent unhandled 500 HTML crashes
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    return res.status(413).json({
+      error: 'Payload Too Large: Product request exceeded size limit. Please upload images directly to Cloudinary or provide hosted HTTPS image URLs instead of raw image data.',
+    });
+  }
   console.error('Unhandled API error:', err);
-  res.status(500).json({ error: err.message || 'Internal server error' });
+  res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
 });
 
 // Export default function for Vercel Serverless Function runtime

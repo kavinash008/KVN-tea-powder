@@ -326,4 +326,43 @@ export const api = {
       headers: getAdminHeaders(token),
     });
   },
+
+  // 7. Cloudinary Signed Image Uploads
+  async getCloudinarySignature(token?: string | null): Promise<{
+    configured: boolean;
+    cloudName?: string;
+    apiKey?: string;
+    timestamp?: number;
+    folder?: string;
+    signature?: string;
+    message?: string;
+  }> {
+    return safeRequest(`${API_BASE}/admin/cloudinary-sign`, {
+      method: 'GET',
+      headers: getAdminHeaders(token),
+    });
+  },
+
+  async uploadToCloudinary(
+    file: File,
+    signData: { cloudName: string; apiKey: string; timestamp: number; folder: string; signature: string }
+  ): Promise<{ secure_url: string; public_id: string }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('api_key', signData.apiKey);
+    formData.append('timestamp', String(signData.timestamp));
+    formData.append('signature', signData.signature);
+    formData.append('folder', signData.folder);
+
+    const res = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(signData.cloudName)}/image/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.error?.message || `Cloudinary upload failed with status ${res.status}`);
+    }
+    return { secure_url: data.secure_url, public_id: data.public_id };
+  },
 };

@@ -1,5 +1,6 @@
 // server/index.ts
 import express from "express";
+import crypto3 from "crypto";
 
 // server/_lib/db.ts
 import { MongoClient } from "mongodb";
@@ -2436,11 +2437,45 @@ router.get("/products/:id", async (req, res) => {
     return res.status(500).json({ error: "Failed to load product" });
   }
 });
+var handleCloudinarySign = (req, res) => {
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  const folder = process.env.CLOUDINARY_FOLDER || "kvn_products";
+  if (!cloudName || !apiKey || !apiSecret) {
+    return res.json({
+      configured: false,
+      message: "Cloudinary environment variables (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET) are not configured in Vercel."
+    });
+  }
+  const timestamp = Math.floor(Date.now() / 1e3);
+  const toSign = `folder=${folder}&timestamp=${timestamp}${apiSecret}`;
+  const signature = crypto3.createHash("sha1").update(toSign).digest("hex");
+  return res.json({
+    configured: true,
+    cloudName,
+    apiKey,
+    folder,
+    timestamp,
+    signature
+  });
+};
+router.get("/admin/cloudinary-sign", authenticateAdmin, handleCloudinarySign);
+router.post("/admin/cloudinary-sign", authenticateAdmin, handleCloudinarySign);
 router.post("/admin/products", authenticateAdmin, async (req, res) => {
   try {
     const productData = req.body;
     if (!productData || !productData.name || !productData.name.trim()) {
       return res.status(400).json({ error: "Product name is required" });
+    }
+    if (Array.isArray(productData.images)) {
+      for (const img of productData.images) {
+        if (typeof img === "string" && img.startsWith("data:image/") && img.length > 2e5) {
+          return res.status(400).json({
+            error: "Oversized Base64 image detected (>150KB). Please upload images via Cloudinary or supply hosted HTTPS image URLs."
+          });
+        }
+      }
     }
     const saved = await serverDb.saveProduct(productData);
     return res.status(201).json({ success: true, product: saved });
@@ -2454,6 +2489,15 @@ router.put("/admin/products/:id", authenticateAdmin, async (req, res) => {
     const productData = req.body;
     if (!productData) {
       return res.status(400).json({ error: "Product data is required" });
+    }
+    if (Array.isArray(productData.images)) {
+      for (const img of productData.images) {
+        if (typeof img === "string" && img.startsWith("data:image/") && img.length > 2e5) {
+          return res.status(400).json({
+            error: "Oversized Base64 image detected (>150KB). Please upload images via Cloudinary or supply hosted HTTPS image URLs."
+          });
+        }
+      }
     }
     const updated = await serverDb.updateProduct(id, productData);
     if (!updated) {
@@ -2574,8 +2618,13 @@ app.use((req, res) => {
   res.status(404).json({ error: "API route not found", path: req.url });
 });
 app.use((err, _req, res, _next) => {
+  if (err && (err.type === "entity.too.large" || err.status === 413)) {
+    return res.status(413).json({
+      error: "Payload Too Large: Product request exceeded size limit. Please upload images directly to Cloudinary or provide hosted HTTPS image URLs instead of raw image data."
+    });
+  }
   console.error("Unhandled API error:", err);
-  res.status(500).json({ error: err.message || "Internal server error" });
+  res.status(err.status || 500).json({ error: err.message || "Internal server error" });
 });
 function handler(req, res) {
   return app(req, res);
