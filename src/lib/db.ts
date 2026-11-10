@@ -65,6 +65,18 @@ export const db = {
     return getFromStorage<Product[]>(KEYS.PRODUCTS, INITIAL_PRODUCTS);
   },
 
+  saveProductsToCache(products: Product[]): void {
+    if (Array.isArray(products) && products.length > 0) {
+      saveToStorage(KEYS.PRODUCTS, products);
+    }
+  },
+
+  saveCategoriesToCache(categories: Category[]): void {
+    if (Array.isArray(categories) && categories.length > 0) {
+      saveToStorage(KEYS.CATEGORIES, categories);
+    }
+  },
+
   getProductById(id: string): Product | undefined {
     return this.getProducts().find((p) => p.id === id);
   },

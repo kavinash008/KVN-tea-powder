@@ -1,4 +1,4 @@
-import { CartItem, OrderCustomer } from '../../src/types';
+import { CartItem, OrderCustomer, Product } from '../../src/types';
 import { INITIAL_PRODUCTS, INITIAL_BUSINESS_CONFIG } from '../../src/data/initialData';
 
 export function validatePhone(phone: string): { valid: boolean; normalized: string; error?: string } {
@@ -45,7 +45,7 @@ export function validateAddress(customer: Partial<OrderCustomer>): { valid: bool
  * Validates order items against the authoritative product catalogue.
  * Recomputes all prices and totals strictly on the server to prevent manipulation.
  */
-export function validateAndPriceOrder(items: CartItem[]): {
+export function validateAndPriceOrder(items: CartItem[], productsList?: Product[]): {
   valid: boolean;
   validatedItems: CartItem[];
   subtotal: number;
@@ -57,32 +57,46 @@ export function validateAndPriceOrder(items: CartItem[]): {
     return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: 'Cart is empty' };
   }
 
+  const catalog = productsList && productsList.length > 0 ? productsList : INITIAL_PRODUCTS;
   const validatedItems: CartItem[] = [];
   let subtotal = 0;
 
   for (const item of items) {
-    const product = INITIAL_PRODUCTS.find(
+    const product = catalog.find(
       (p) => p.id === item.productId || p.slug === item.productId || p.name.toLowerCase() === (item.productName || '').toLowerCase()
     );
     if (!product) {
-      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `Product not found: ${item.productId || item.productName}` };
+      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `Product not found or no longer available: ${item.productName || item.productId}` };
     }
 
-    const variant = product.variants.find((v) => v.id === item.variantId || v.weight === item.weight) || product.variants[0];
+    if (product.status === 'archived' || product.status === 'draft' || (product as any).published === false) {
+      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `"${product.name}" is currently unavailable for purchase` };
+    }
+
+    const variant = product.variants?.find((v) => v.id === item.variantId || v.weight === item.weight) || product.variants?.[0];
     if (!variant) {
-      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `Invalid variant for ${product.name}` };
+      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `Invalid weight variant selected for ${product.name}` };
     }
 
     const quantity = Math.max(1, Math.min(99, Math.floor(Number(item.quantity) || 1)));
-    const trustedUnitPrice = Number(variant.sellingPrice);
-    const trustedMrp = Number(variant.mrp);
+
+    if (Number(variant.stock) <= 0) {
+      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `"${product.name} (${variant.weight})" is out of stock` };
+    }
+
+    if (quantity > Number(variant.stock)) {
+      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `Only ${variant.stock} unit(s) available for "${product.name} (${variant.weight})"` };
+    }
+
+    const trustedUnitPrice = Number(variant.sellingPrice ?? (variant as any).price ?? 0);
+    const trustedMrp = Number(variant.mrp ?? (variant as any).originalPrice ?? trustedUnitPrice);
 
     subtotal += trustedUnitPrice * quantity;
 
     validatedItems.push({
       productId: product.id,
       productName: product.name,
-      productImage: product.images[0] || item.productImage || '',
+      productImage: product.images?.[0] || item.productImage || '',
       category: product.mainCategory,
       variantId: variant.id,
       weight: variant.weight,

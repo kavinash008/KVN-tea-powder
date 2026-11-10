@@ -382,7 +382,8 @@ router.post('/orders', rateLimiter(15, 60000), async (req: Request, res: Respons
       return res.status(400).json({ error: addrVal.error });
     }
 
-    const pricing = validateAndPriceOrder(items);
+    const currentProducts = await serverDb.getAllProducts();
+    const pricing = validateAndPriceOrder(items, currentProducts);
     if (!pricing.valid) {
       return res.status(400).json({ error: pricing.error });
     }
@@ -697,13 +698,25 @@ router.get('/admin/stats', authenticateAdmin, async (_req: Request, res: Respons
 // 5. PRODUCT CATALOG ENDPOINTS
 // ==========================================
 
-// Get All Products (Public)
+// Get All Products (Public - Only Active / Published)
 router.get('/products', async (_req: Request, res: Response) => {
   try {
-    const products = await serverDb.getAllProducts();
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const products = await serverDb.getAllProducts(true);
     return res.json({ products });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to load products' });
+  }
+});
+
+// Admin: Get All Products (including draft and archived)
+router.get('/admin/products', authenticateAdmin, async (_req: Request, res: Response) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const products = await serverDb.getAllProducts(false);
+    return res.json({ products });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to load admin products' });
   }
 });
 
@@ -720,17 +733,35 @@ router.get('/products/:id', async (req: Request, res: Response) => {
   }
 });
 
-// Admin: Save or Update Product
+// Admin: Create Product (POST)
 router.post('/admin/products', authenticateAdmin, async (req: Request, res: Response) => {
   try {
     const productData = req.body;
-    if (!productData.name || !productData.id) {
-      return res.status(400).json({ error: 'Product ID and Name are required' });
+    if (!productData || !productData.name || !productData.name.trim()) {
+      return res.status(400).json({ error: 'Product name is required' });
     }
     const saved = await serverDb.saveProduct(productData);
     return res.status(201).json({ success: true, product: saved });
   } catch (err: any) {
-    return res.status(500).json({ error: 'Failed to save product' });
+    return res.status(500).json({ error: err?.message || 'Failed to save product' });
+  }
+});
+
+// Admin: Update Product (PUT)
+router.put('/admin/products/:id', authenticateAdmin, async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id;
+    const productData = req.body;
+    if (!productData) {
+      return res.status(400).json({ error: 'Product data is required' });
+    }
+    const updated = await serverDb.updateProduct(id, productData);
+    if (!updated) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    return res.json({ success: true, product: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to update product' });
   }
 });
 
@@ -744,6 +775,44 @@ router.delete('/admin/products/:id', authenticateAdmin, async (req: Request, res
     return res.json({ success: true, message: 'Product deleted' });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to delete product' });
+  }
+});
+
+// Get Categories (Public)
+router.get('/categories', async (_req: Request, res: Response) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const categories = await serverDb.getAllCategories();
+    return res.json({ categories });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to load categories' });
+  }
+});
+
+// Admin: Save Category
+router.post('/admin/categories', authenticateAdmin, async (req: Request, res: Response) => {
+  try {
+    const catData = req.body;
+    if (!catData || !catData.name) {
+      return res.status(400).json({ error: 'Category name is required' });
+    }
+    const saved = await serverDb.saveCategory(catData);
+    return res.status(201).json({ success: true, category: saved });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to save category' });
+  }
+});
+
+// Admin: Delete Category
+router.delete('/admin/categories/:id', authenticateAdmin, async (req: Request, res: Response) => {
+  try {
+    const success = await serverDb.deleteCategory(req.params.id);
+    if (!success) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+    return res.json({ success: true, message: 'Category deleted' });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to delete category' });
   }
 });
 

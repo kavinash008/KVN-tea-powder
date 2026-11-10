@@ -39,7 +39,7 @@ import {
 } from 'lucide-react';
 
 function AppContent() {
-  const { config, toast, showToast, wishlist, products } = useShop();
+  const { config, toast, showToast, wishlist, products, refreshProducts } = useShop();
 
   // Navigation page views
   const [currentPage, setCurrentPage] = useState<
@@ -76,20 +76,22 @@ function AppContent() {
   const [banners, setBanners] = useState(() => db.getBanners());
 
   useEffect(() => {
-    if (products && products.length > 0) {
-      setAllProducts(products.filter((p) => p.status === 'published'));
+    if (products && Array.isArray(products)) {
+      setAllProducts(products.filter((p) => p.status === 'published' || p.status === 'active' || (!p.status && p.inStock !== false)));
     }
   }, [products]);
 
   useEffect(() => {
     const handleStoreUpdate = () => {
-      setAllProducts(db.getProducts().filter((p) => p.status === 'published'));
+      refreshProducts?.();
       setBanners(db.getBanners());
     };
     window.addEventListener('kvn_store_updated', handleStoreUpdate);
+    window.addEventListener('kvn_products_updated', handleStoreUpdate);
     window.addEventListener('storage', handleStoreUpdate);
     return () => {
       window.removeEventListener('kvn_store_updated', handleStoreUpdate);
+      window.removeEventListener('kvn_products_updated', handleStoreUpdate);
       window.removeEventListener('storage', handleStoreUpdate);
     };
   }, []);

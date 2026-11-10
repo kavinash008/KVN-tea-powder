@@ -18,6 +18,18 @@ var INITIAL_BUSINESS_CONFIG = {
   fssaiNumber: "",
   gstNumber: ""
 };
+var INITIAL_CATEGORIES = [
+  { id: "cat-1", name: "Premium Tea Powder", slug: "premium-tea", mainCategory: "tea", description: "Selected high-elevation CTC leaves for brisk, rich liquor and deep aroma." },
+  { id: "cat-2", name: "Strong Tea Powder", slug: "strong-tea", mainCategory: "tea", description: "Deep red cup and intense kadak taste, ideal for morning milk tea." },
+  { id: "cat-3", name: "Dust Tea", slug: "dust-tea", mainCategory: "tea", description: "Fine textured tea dust producing quick, strong color and bold traditional taste." },
+  { id: "cat-4", name: "Masala Tea", slug: "masala-tea", mainCategory: "tea", description: "Blended with fresh cardamom, ginger, cloves, and cinnamon." },
+  { id: "cat-5", name: "Herbal Tea", slug: "herbal-tea", mainCategory: "tea", description: "Natural wellness infusions with tulsi, lemongrass, and natural botanicals." },
+  { id: "cat-6", name: "Filter Coffee Powder", slug: "filter-coffee", mainCategory: "coffee", description: "80:20 roasted plantation coffee & chicory blend for authentic South Indian decoction." },
+  { id: "cat-7", name: "Premium Coffee Powder", slug: "premium-coffee", mainCategory: "coffee", description: "100% pure roasted Arabica and Robusta beans ground to perfection." },
+  { id: "cat-8", name: "Strong Coffee Blend", slug: "strong-coffee", mainCategory: "coffee", description: "Rich bold roast with 70:30 roast for thick, creamy South Indian filter coffee." },
+  { id: "cat-9", name: "Instant Coffee", slug: "instant-coffee", mainCategory: "coffee", description: "Quick dissolving granules for instant aroma and rich taste anytime." },
+  { id: "cat-10", name: "Special Combos", slug: "combos", mainCategory: "combo", description: "Curated value packs of tea and coffee for households and gifts." }
+];
 var INITIAL_PRODUCTS = [
   {
     id: "prod-1",
@@ -211,6 +223,7 @@ function ensureLocalFile() {
     orders: [],
     users: [],
     products: INITIAL_PRODUCTS,
+    categories: INITIAL_CATEGORIES,
     webhookEvents: [],
     lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
   };
@@ -234,6 +247,7 @@ function ensureLocalFile() {
     parsed.orders = parsed.orders || [];
     parsed.users = parsed.users || [];
     parsed.products = parsed.products || INITIAL_PRODUCTS;
+    parsed.categories = parsed.categories || INITIAL_CATEGORIES;
     localStateCache = parsed;
     return localStateCache;
   } catch {
@@ -297,6 +311,8 @@ async function getMongoDb() {
       });
       cachedDb.collection("products").createIndex({ id: 1 }, { unique: true }).catch(() => {
       });
+      cachedDb.collection("categories").createIndex({ id: 1 }, { unique: true }).catch(() => {
+      });
       cachedDb.collection("webhook_outbox").createIndex({ eventId: 1 }, { unique: true }).catch(() => {
       });
       cachedDb.collection("webhook_outbox").createIndex({ status: 1 }).catch(() => {
@@ -305,6 +321,15 @@ async function getMongoDb() {
         if (count === 0 && cachedDb) {
           try {
             await cachedDb.collection("products").insertMany(INITIAL_PRODUCTS);
+          } catch {
+          }
+        }
+      }).catch(() => {
+      });
+      cachedDb.collection("categories").countDocuments().then(async (count) => {
+        if (count === 0 && cachedDb) {
+          try {
+            await cachedDb.collection("categories").insertMany(INITIAL_CATEGORIES);
           } catch {
           }
         }
@@ -878,53 +903,115 @@ var serverDb = {
     };
   },
   // ===================== PRODUCTS =====================
-  async getAllProducts() {
+  async getAllProducts(onlyActive = false) {
     const db = await getMongoDb();
+    let list = [];
     if (db) {
       const docs = await db.collection("products").find({}).toArray();
       if (docs.length > 0) {
-        return docs.map((d) => {
+        list = docs.map((d) => {
           const { _id, ...rest } = d;
           return rest;
         });
+      } else {
+        await db.collection("products").insertMany(INITIAL_PRODUCTS).catch(() => {
+        });
+        list = INITIAL_PRODUCTS;
       }
-      await db.collection("products").insertMany(INITIAL_PRODUCTS).catch(() => {
-      });
-      return INITIAL_PRODUCTS;
+    } else {
+      const state = ensureLocalFile();
+      if (!state.products || state.products.length === 0) {
+        state.products = INITIAL_PRODUCTS;
+        await saveLocalFile(state);
+      }
+      list = state.products;
     }
-    const state = ensureLocalFile();
-    if (!state.products || state.products.length === 0) {
-      state.products = INITIAL_PRODUCTS;
-      await saveLocalFile(state);
+    if (onlyActive) {
+      return list.filter((p) => (p.status === "published" || p.status === "active" || !p.status && p.inStock !== false) && p.published !== false);
     }
-    return state.products;
+    return list;
   },
   async getProductById(id) {
-    const products = await this.getAllProducts();
+    const products = await this.getAllProducts(false);
     return products.find((p) => p.id === id || p.slug === id) || null;
   },
   async saveProduct(product) {
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const updatedProduct = { ...product, updatedAt: now };
+    const id = product.id || `prod-${Date.now()}-${Math.floor(Math.random() * 1e3)}`;
+    const slug = product.slug || product.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || id;
+    const sku = product.sku || `KVN-${Date.now().toString().slice(-6)}`;
+    const rawVariants = product.variants && product.variants.length > 0 ? product.variants : [
+      { id: "v1", weight: "250g", mrp: 140, sellingPrice: 120, stock: 20 }
+    ];
+    const variants = rawVariants.map((v, idx2) => {
+      const sellingPrice = Number(v.sellingPrice ?? v.price ?? 120);
+      const mrp = Number(v.mrp ?? v.originalPrice ?? sellingPrice);
+      const stock = Number(v.stock !== void 0 ? v.stock : 25);
+      return {
+        id: v.id || `var-${id}-${idx2 + 1}`,
+        weight: v.weight || "250g",
+        mrp,
+        sellingPrice,
+        stock,
+        sku: v.sku || `${sku}-${idx2 + 1}`
+      };
+    });
+    const totalStock = variants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+    const resolvedStatus = product.published === false ? "draft" : product.status || "published";
+    const inStock = totalStock > 0 && resolvedStatus !== "archived";
+    const completeProduct = {
+      id,
+      sku,
+      name: product.name || "KVN Special Tea Powder",
+      slug,
+      categorySlug: product.categorySlug || "premium-tea",
+      mainCategory: product.mainCategory || "tea",
+      brand: product.brand || "KVN TEAPOWDER",
+      description: product.description || "",
+      brewingInstructions: product.brewingInstructions || "",
+      ingredients: product.ingredients || "",
+      images: product.images && product.images.length > 0 ? product.images : ["https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=800&q=80"],
+      variants,
+      inStock,
+      stockCount: totalStock,
+      price: variants[0]?.sellingPrice || 120,
+      isFeatured: Boolean(product.isFeatured),
+      isBestSeller: Boolean(product.isBestSeller),
+      isNewArrival: product.isNewArrival !== void 0 ? Boolean(product.isNewArrival) : true,
+      status: resolvedStatus,
+      published: resolvedStatus === "published",
+      createdAt: product.createdAt || now,
+      updatedAt: now
+    };
     const db = await getMongoDb();
     if (db) {
       await db.collection("products").updateOne(
-        { id: product.id },
-        { $set: updatedProduct },
+        { id: completeProduct.id },
+        { $set: completeProduct },
         { upsert: true }
       );
-      return updatedProduct;
     }
     const state = ensureLocalFile();
     state.products = state.products || [];
-    const idx = state.products.findIndex((p) => p.id === product.id);
+    const idx = state.products.findIndex((p) => p.id === completeProduct.id);
     if (idx >= 0) {
-      state.products[idx] = updatedProduct;
+      state.products[idx] = completeProduct;
     } else {
-      state.products.push(updatedProduct);
+      state.products.push(completeProduct);
     }
     await saveLocalFile(state);
-    return updatedProduct;
+    return completeProduct;
+  },
+  async updateProduct(id, updates) {
+    const existing = await this.getProductById(id);
+    if (!existing) return null;
+    const merged = { ...existing, ...updates, id, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    if (updates.variants) {
+      const totalStock = updates.variants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+      merged.stockCount = totalStock;
+      merged.inStock = totalStock > 0 && merged.status !== "archived";
+    }
+    return this.saveProduct(merged);
   },
   async deleteProduct(id) {
     const db = await getMongoDb();
@@ -968,6 +1055,66 @@ var serverDb = {
       }
     }
     await saveLocalFile(state);
+  },
+  // ===================== CATEGORIES =====================
+  async getAllCategories() {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection("categories").find({}).toArray();
+      if (docs.length > 0) {
+        return docs.map((d) => {
+          const { _id, ...rest } = d;
+          return rest;
+        });
+      }
+      await db.collection("categories").insertMany(INITIAL_CATEGORIES).catch(() => {
+      });
+      return INITIAL_CATEGORIES;
+    }
+    const state = ensureLocalFile();
+    if (!state.categories || state.categories.length === 0) {
+      state.categories = INITIAL_CATEGORIES;
+      await saveLocalFile(state);
+    }
+    return state.categories;
+  },
+  async saveCategory(category) {
+    const id = category.id || `cat-${Date.now()}`;
+    const cleanCat = { ...category, id };
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection("categories").updateOne(
+        { id },
+        { $set: cleanCat },
+        { upsert: true }
+      );
+    }
+    const state = ensureLocalFile();
+    state.categories = state.categories || [];
+    const idx = state.categories.findIndex((c) => c.id === id);
+    if (idx >= 0) {
+      state.categories[idx] = cleanCat;
+    } else {
+      state.categories.push(cleanCat);
+    }
+    await saveLocalFile(state);
+    return cleanCat;
+  },
+  async deleteCategory(id) {
+    const db = await getMongoDb();
+    if (db) {
+      const res = await db.collection("categories").deleteOne({ id });
+      return res.deletedCount > 0;
+    }
+    const state = ensureLocalFile();
+    if (!state.categories) return false;
+    const initialLen = state.categories.length;
+    state.categories = state.categories.filter((c) => c.id !== id);
+    if (state.categories.length !== initialLen) {
+      await saveLocalFile(state);
+      return true;
+    }
+    return false;
   }
 };
 
@@ -1068,31 +1215,41 @@ function validateAddress(customer) {
   }
   return { valid: true };
 }
-function validateAndPriceOrder(items) {
+function validateAndPriceOrder(items, productsList) {
   if (!items || !Array.isArray(items) || items.length === 0) {
     return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: "Cart is empty" };
   }
+  const catalog = productsList && productsList.length > 0 ? productsList : INITIAL_PRODUCTS;
   const validatedItems = [];
   let subtotal = 0;
   for (const item of items) {
-    const product = INITIAL_PRODUCTS.find(
+    const product = catalog.find(
       (p) => p.id === item.productId || p.slug === item.productId || p.name.toLowerCase() === (item.productName || "").toLowerCase()
     );
     if (!product) {
-      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `Product not found: ${item.productId || item.productName}` };
+      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `Product not found or no longer available: ${item.productName || item.productId}` };
     }
-    const variant = product.variants.find((v) => v.id === item.variantId || v.weight === item.weight) || product.variants[0];
+    if (product.status === "archived" || product.status === "draft" || product.published === false) {
+      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `"${product.name}" is currently unavailable for purchase` };
+    }
+    const variant = product.variants?.find((v) => v.id === item.variantId || v.weight === item.weight) || product.variants?.[0];
     if (!variant) {
-      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `Invalid variant for ${product.name}` };
+      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `Invalid weight variant selected for ${product.name}` };
     }
     const quantity = Math.max(1, Math.min(99, Math.floor(Number(item.quantity) || 1)));
-    const trustedUnitPrice = Number(variant.sellingPrice);
-    const trustedMrp = Number(variant.mrp);
+    if (Number(variant.stock) <= 0) {
+      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `"${product.name} (${variant.weight})" is out of stock` };
+    }
+    if (quantity > Number(variant.stock)) {
+      return { valid: false, validatedItems: [], subtotal: 0, deliveryCharge: 0, totalAmount: 0, error: `Only ${variant.stock} unit(s) available for "${product.name} (${variant.weight})"` };
+    }
+    const trustedUnitPrice = Number(variant.sellingPrice ?? variant.price ?? 0);
+    const trustedMrp = Number(variant.mrp ?? variant.originalPrice ?? trustedUnitPrice);
     subtotal += trustedUnitPrice * quantity;
     validatedItems.push({
       productId: product.id,
       productName: product.name,
-      productImage: product.images[0] || item.productImage || "",
+      productImage: product.images?.[0] || item.productImage || "",
       category: product.mainCategory,
       variantId: variant.id,
       weight: variant.weight,
@@ -1981,7 +2138,8 @@ router.post("/orders", rateLimiter(15, 6e4), async (req, res) => {
     if (!addrVal.valid) {
       return res.status(400).json({ error: addrVal.error });
     }
-    const pricing = validateAndPriceOrder(items);
+    const currentProducts = await serverDb.getAllProducts();
+    const pricing = validateAndPriceOrder(items, currentProducts);
     if (!pricing.valid) {
       return res.status(400).json({ error: pricing.error });
     }
@@ -2251,10 +2409,20 @@ router.get("/admin/stats", authenticateAdmin, async (_req, res) => {
 });
 router.get("/products", async (_req, res) => {
   try {
-    const products = await serverDb.getAllProducts();
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    const products = await serverDb.getAllProducts(true);
     return res.json({ products });
   } catch (err) {
     return res.status(500).json({ error: "Failed to load products" });
+  }
+});
+router.get("/admin/products", authenticateAdmin, async (_req, res) => {
+  try {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    const products = await serverDb.getAllProducts(false);
+    return res.json({ products });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load admin products" });
   }
 });
 router.get("/products/:id", async (req, res) => {
@@ -2271,13 +2439,29 @@ router.get("/products/:id", async (req, res) => {
 router.post("/admin/products", authenticateAdmin, async (req, res) => {
   try {
     const productData = req.body;
-    if (!productData.name || !productData.id) {
-      return res.status(400).json({ error: "Product ID and Name are required" });
+    if (!productData || !productData.name || !productData.name.trim()) {
+      return res.status(400).json({ error: "Product name is required" });
     }
     const saved = await serverDb.saveProduct(productData);
     return res.status(201).json({ success: true, product: saved });
   } catch (err) {
-    return res.status(500).json({ error: "Failed to save product" });
+    return res.status(500).json({ error: err?.message || "Failed to save product" });
+  }
+});
+router.put("/admin/products/:id", authenticateAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const productData = req.body;
+    if (!productData) {
+      return res.status(400).json({ error: "Product data is required" });
+    }
+    const updated = await serverDb.updateProduct(id, productData);
+    if (!updated) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+    return res.json({ success: true, product: updated });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || "Failed to update product" });
   }
 });
 router.delete("/admin/products/:id", authenticateAdmin, async (req, res) => {
@@ -2289,6 +2473,38 @@ router.delete("/admin/products/:id", authenticateAdmin, async (req, res) => {
     return res.json({ success: true, message: "Product deleted" });
   } catch (err) {
     return res.status(500).json({ error: "Failed to delete product" });
+  }
+});
+router.get("/categories", async (_req, res) => {
+  try {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    const categories = await serverDb.getAllCategories();
+    return res.json({ categories });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load categories" });
+  }
+});
+router.post("/admin/categories", authenticateAdmin, async (req, res) => {
+  try {
+    const catData = req.body;
+    if (!catData || !catData.name) {
+      return res.status(400).json({ error: "Category name is required" });
+    }
+    const saved = await serverDb.saveCategory(catData);
+    return res.status(201).json({ success: true, category: saved });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to save category" });
+  }
+});
+router.delete("/admin/categories/:id", authenticateAdmin, async (req, res) => {
+  try {
+    const success = await serverDb.deleteCategory(req.params.id);
+    if (!success) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+    return res.json({ success: true, message: "Category deleted" });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to delete category" });
   }
 });
 router.get("/admin/whatsapp/status", authenticateAdmin, async (_req, res) => {

@@ -1,4 +1,4 @@
-import { Order, OrderCustomer, CartItem, CustomerAddress, CustomerUser, OrderStatus, Product } from '../types';
+import { Order, OrderCustomer, CartItem, CustomerAddress, CustomerUser, OrderStatus, Product, Category } from '../types';
 
 const API_BASE = '/api';
 
@@ -234,9 +234,9 @@ export const api = {
     });
   },
 
-  // 5. Products
+  // 5. Products & Categories
   async getProducts(): Promise<Product[]> {
-    const json = await safeRequest<{ products: Product[] }>(`${API_BASE}/products`);
+    const json = await safeRequest<{ products: Product[] }>(`${API_BASE}/products?_t=${Date.now()}`);
     return json.products || [];
   },
 
@@ -245,7 +245,14 @@ export const api = {
     return json.product;
   },
 
-  async adminSaveProduct(token: string | undefined, product: Product): Promise<Product> {
+  async adminGetProducts(token?: string): Promise<Product[]> {
+    const json = await safeRequest<{ products: Product[] }>(`${API_BASE}/admin/products?_t=${Date.now()}`, {
+      headers: getAdminHeaders(token),
+    });
+    return json.products || [];
+  },
+
+  async adminSaveProduct(token: string | undefined, product: Partial<Product>): Promise<Product> {
     const json = await safeRequest<{ product: Product }>(`${API_BASE}/admin/products`, {
       method: 'POST',
       headers: getAdminHeaders(token),
@@ -254,8 +261,39 @@ export const api = {
     return json.product;
   },
 
+  async adminUpdateProduct(token: string | undefined, id: string, product: Partial<Product>): Promise<Product> {
+    const json = await safeRequest<{ product: Product }>(`${API_BASE}/admin/products/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: getAdminHeaders(token),
+      body: JSON.stringify(product),
+    });
+    return json.product;
+  },
+
   async adminDeleteProduct(token: string | undefined, id: string): Promise<boolean> {
     await safeRequest(`${API_BASE}/admin/products/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: getAdminHeaders(token),
+    });
+    return true;
+  },
+
+  async getCategories(): Promise<Category[]> {
+    const json = await safeRequest<{ categories: Category[] }>(`${API_BASE}/categories?_t=${Date.now()}`);
+    return json.categories || [];
+  },
+
+  async adminSaveCategory(token: string | undefined, category: any): Promise<Category> {
+    const json = await safeRequest<{ category: Category }>(`${API_BASE}/admin/categories`, {
+      method: 'POST',
+      headers: getAdminHeaders(token),
+      body: JSON.stringify(category),
+    });
+    return json.category;
+  },
+
+  async adminDeleteCategory(token: string | undefined, id: string): Promise<boolean> {
+    await safeRequest(`${API_BASE}/admin/categories/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers: getAdminHeaders(token),
     });

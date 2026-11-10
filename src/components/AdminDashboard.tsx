@@ -194,16 +194,36 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
     }
   }, [orderStatusFilter]);
 
+  const loadServerProducts = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+      const serverProducts = await api.adminGetProducts(token);
+      if (Array.isArray(serverProducts)) {
+        setProducts(serverProducts);
+        db.saveProductsToCache(serverProducts);
+      }
+      const serverCategories = await api.getCategories();
+      if (Array.isArray(serverCategories) && serverCategories.length > 0) {
+        setCategories(serverCategories);
+        db.saveCategoriesToCache(serverCategories);
+      }
+    } catch (err: any) {
+      console.warn('Admin products sync notice:', err);
+    }
+  }, []);
+
   // Real-time polling every 12 seconds to fetch orders placed on other devices
   useEffect(() => {
     loadServerOrders();
+    loadServerProducts();
     loadWebhookStatus();
     const interval = setInterval(() => {
       loadServerOrders();
+      loadServerProducts();
       loadWebhookStatus();
     }, 12000);
     return () => clearInterval(interval);
-  }, [loadServerOrders, loadWebhookStatus]);
+  }, [loadServerOrders, loadServerProducts, loadWebhookStatus]);
 
   const handleUpdateOrderStatus = async (orderId: string, newStatus: any) => {
     try {
@@ -222,8 +242,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
   };
 
   const refreshData = () => {
-    setProducts(db.getProducts());
-    setCategories(db.getCategories());
+    loadServerProducts();
     loadServerOrders();
     setFeedbackList(db.getFeedback());
     setContactList(db.getContactMessages());
@@ -582,9 +601,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                               </div>
                             </td>
                             <td className="p-3.5">
-                              <span className={`font-semibold ${totalStock === 0 ? 'text-red-600' : totalStock <= 10 ? 'text-amber-600' : 'text-emerald-700'}`}>
-                                {totalStock} units
-                              </span>
+                              <div className="flex items-center gap-1.5">
+                                <span className={`font-semibold ${totalStock === 0 ? 'text-red-600' : totalStock <= 10 ? 'text-amber-600' : 'text-emerald-700'}`}>
+                                  {totalStock} units
+                                </span>
+                                <button
+                                  onClick={async () => {
+                                    const newStock = totalStock === 0 ? 25 : 0;
+                                    const updatedVariants = prod.variants.map((v) => ({ ...v, stock: newStock }));
+                                    try {
+                                      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+                                      const updated = await api.adminUpdateProduct(token, prod.id, { variants: updatedVariants });
+                                      setProducts((prev) => prev.map((p) => p.id === prod.id ? updated : p));
+                                      db.saveProduct(updated);
+                                      window.dispatchEvent(new Event('kvn_products_updated'));
+                                      showAdminToast(totalStock === 0 ? `Restocked "${prod.name}" (25 units)` : `Marked "${prod.name}" as Out of Stock`);
+                                    } catch (err: any) {
+                                      showAdminToast(`Failed to update stock: ${err?.message}`);
+                                    }
+                                  }}
+                                  className="text-[10px] text-stone-500 hover:text-stone-900 underline ml-1 cursor-pointer"
+                                  title={totalStock === 0 ? "Restock 25 units" : "Mark Out of Stock (0)"}
+                                >
+                                  {totalStock === 0 ? "Restock" : "Set 0"}
+                                </button>
+                              </div>
                             </td>
                             <td className="p-3.5">
                               <div className="flex flex-wrap gap-1">
@@ -594,30 +635,53 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                               </div>
                             </td>
                             <td className="p-3.5">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                                prod.status === 'published' ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-700'
-                              }`}>
-                                {prod.status}
-                              </span>
+                              <button
+                                onClick={async () => {
+                                  const nextStatus = prod.status === 'published' ? 'draft' : 'published';
+                                  try {
+                                    const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+                                    const updated = await api.adminUpdateProduct(token, prod.id, { status: nextStatus });
+                                    setProducts((prev) => prev.map((p) => p.id === prod.id ? updated : p));
+                                    db.saveProduct(updated);
+                                    window.dispatchEvent(new Event('kvn_products_updated'));
+                                    showAdminToast(`Product "${prod.name}" set to ${nextStatus}`);
+                                  } catch (err: any) {
+                                    showAdminToast(`Failed to update status: ${err?.message}`);
+                                  }
+                                }}
+                                className={`px-2 py-0.5 rounded text-[10px] font-semibold cursor-pointer transition-all active:scale-95 ${
+                                  prod.status === 'published' ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'
+                                }`}
+                                title={prod.status === 'published' ? 'Click to deactivate (hide from store)' : 'Click to publish (show in store)'}
+                              >
+                                {prod.status === 'published' ? '● Published' : '○ Draft'}
+                              </button>
                             </td>
                             <td className="p-3.5 text-right">
                               <div className="flex items-center justify-end gap-2">
                                 <button
                                   onClick={() => setEditingProduct(prod)}
-                                  className="p-1.5 text-stone-500 hover:text-[#2e5e43] hover:bg-stone-100 rounded-lg transition-colors"
+                                  className="p-1.5 text-stone-500 hover:text-[#2e5e43] hover:bg-stone-100 rounded-lg transition-colors cursor-pointer"
                                   title="Edit Product"
                                 >
                                   <Edit2 className="w-4 h-4" />
                                 </button>
                                 <button
-                                  onClick={() => {
-                                    if (confirm(`Are you sure you want to delete ${prod.name}?`)) {
-                                      db.deleteProduct(prod.id);
-                                      refreshData();
-                                      showAdminToast('Product deleted');
+                                  onClick={async () => {
+                                    if (confirm(`Are you sure you want to delete "${prod.name}" from MongoDB database?`)) {
+                                      try {
+                                        const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+                                        await api.adminDeleteProduct(token, prod.id);
+                                        setProducts((prev) => prev.filter((p) => p.id !== prod.id));
+                                        db.deleteProduct(prod.id);
+                                        window.dispatchEvent(new Event('kvn_products_updated'));
+                                        showAdminToast(`Product "${prod.name}" deleted from database`);
+                                      } catch (err: any) {
+                                        showAdminToast(`Failed to delete product: ${err?.message}`);
+                                      }
                                     }
                                   }}
-                                  className="p-1.5 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                  className="p-1.5 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
                                   title="Delete Product"
                                 >
                                   <Trash2 className="w-4 h-4" />
@@ -660,13 +724,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                         {cat.mainCategory}
                       </span>
                       <button
-                        onClick={() => {
-                          if (confirm(`Delete category "${cat.name}"?`)) {
-                            db.deleteCategory(cat.id);
-                            refreshData();
+                        onClick={async () => {
+                          if (confirm(`Delete category "${cat.name}" from MongoDB database?`)) {
+                            try {
+                              const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+                              await api.adminDeleteCategory(token, cat.id);
+                              setCategories((prev) => prev.filter((c) => c.id !== cat.id));
+                              db.deleteCategory(cat.id);
+                              showAdminToast(`Category "${cat.name}" deleted from database`);
+                            } catch (err: any) {
+                              showAdminToast(`Error deleting category: ${err?.message}`);
+                            }
                           }
                         }}
-                        className="text-stone-400 hover:text-rose-600"
+                        className="text-stone-400 hover:text-rose-600 cursor-pointer"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -1557,12 +1628,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
             setIsAddingProduct(false);
             setEditingProduct(null);
           }}
-          onSave={(prodData) => {
-            db.saveProduct(prodData);
-            refreshData();
-            setIsAddingProduct(false);
-            setEditingProduct(null);
-            showAdminToast('Product saved and published to website!');
+          onSave={async (prodData) => {
+            try {
+              const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+              let saved: Product;
+              if (editingProduct && editingProduct.id) {
+                saved = await api.adminUpdateProduct(token, editingProduct.id, prodData);
+              } else {
+                saved = await api.adminSaveProduct(token, prodData);
+              }
+              setProducts((prev) => {
+                const idx = prev.findIndex((p) => p.id === saved.id);
+                if (idx >= 0) {
+                  const copy = [...prev];
+                  copy[idx] = saved;
+                  return copy;
+                }
+                return [saved, ...prev];
+              });
+              db.saveProduct(saved);
+              window.dispatchEvent(new Event('kvn_products_updated'));
+              setIsAddingProduct(false);
+              setEditingProduct(null);
+              showAdminToast(`Product "${saved.name}" successfully saved to MongoDB database!`);
+            } catch (err: any) {
+              console.error('Failed to save product:', err);
+              showAdminToast(`Error saving product: ${err?.message || 'Database error'}`);
+            }
           }}
         />
       )}
@@ -1573,20 +1665,36 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
           <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4">
             <h3 className="font-bold text-stone-900 text-base">Add New Category</h3>
             <form
-              onSubmit={(e: any) => {
+              onSubmit={async (e: any) => {
                 e.preventDefault();
                 const form = e.target;
                 const catName = form.name.value;
                 const slug = catName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-                db.saveCategory({
+                const newCat: any = {
+                  id: `cat-${Date.now()}`,
                   name: catName,
                   slug: slug || `cat-${Date.now()}`,
                   mainCategory: form.mainCategory.value,
                   description: form.description.value,
-                });
-                refreshData();
-                setNewCatModalOpen(false);
-                showAdminToast('Category added!');
+                  createdAt: new Date().toISOString()
+                };
+                try {
+                  const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+                  await api.adminSaveCategory(token, newCat);
+                  db.saveCategory(newCat);
+                  setCategories((prev) => {
+                    const filtered = prev.filter(c => c.id !== newCat.id);
+                    return [...filtered, newCat];
+                  });
+                  setNewCatModalOpen(false);
+                  showAdminToast('Category successfully saved to database!');
+                } catch (err: any) {
+                  console.error('Failed to save category:', err);
+                  db.saveCategory(newCat);
+                  setCategories((prev) => [...prev, newCat]);
+                  setNewCatModalOpen(false);
+                  showAdminToast('Category saved locally (backend sync pending)');
+                }
               }}
               className="space-y-3 text-xs"
             >

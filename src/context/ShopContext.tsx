@@ -121,16 +121,34 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshProducts = useCallback(async () => {
     try {
       const serverProducts = await api.getProducts();
-      if (serverProducts && serverProducts.length > 0) {
+      if (Array.isArray(serverProducts)) {
         setProducts(serverProducts);
+        db.saveProductsToCache(serverProducts);
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      console.warn('Live products fetch notice:', err);
     }
   }, []);
 
+  // Real-time synchronization for products across all devices
   useEffect(() => {
     refreshProducts();
+    const interval = setInterval(refreshProducts, 10000); // 10s auto-refresh
+    const handleFocus = () => refreshProducts();
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        refreshProducts();
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('kvn_products_updated', handleFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('kvn_products_updated', handleFocus);
+    };
   }, [refreshProducts]);
 
   // Sync cart to local storage

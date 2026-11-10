@@ -1,8 +1,8 @@
 import { MongoClient, Db } from 'mongodb';
 import fs from 'fs';
 import path from 'path';
-import { Order, OrderStatus, CustomerAddress, Product } from '../../src/types';
-import { INITIAL_PRODUCTS } from '../../src/data/initialData';
+import { Order, OrderStatus, CustomerAddress, Product, Category } from '../../src/types';
+import { INITIAL_PRODUCTS, INITIAL_CATEGORIES } from '../../src/data/initialData';
 import { UserDocument, StoreState } from './types';
 import { WebhookOutboxRecord } from './webhook';
 
@@ -47,6 +47,7 @@ function ensureLocalFile(): StoreState {
     orders: [],
     users: [],
     products: INITIAL_PRODUCTS,
+    categories: INITIAL_CATEGORIES,
     webhookEvents: [],
     lastUpdated: new Date().toISOString(),
   };
@@ -73,6 +74,7 @@ function ensureLocalFile(): StoreState {
     parsed.orders = parsed.orders || [];
     parsed.users = parsed.users || [];
     parsed.products = parsed.products || INITIAL_PRODUCTS;
+    parsed.categories = parsed.categories || INITIAL_CATEGORIES;
     localStateCache = parsed;
     return localStateCache;
   } catch {
@@ -142,6 +144,7 @@ async function getMongoDb(): Promise<Db | null> {
       cachedDb.collection('users').createIndex({ email: 1 }).catch(() => {});
       cachedDb.collection('users').createIndex({ firebaseUid: 1 }).catch(() => {});
       cachedDb.collection('products').createIndex({ id: 1 }, { unique: true }).catch(() => {});
+      cachedDb.collection('categories').createIndex({ id: 1 }, { unique: true }).catch(() => {});
       cachedDb.collection('webhook_outbox').createIndex({ eventId: 1 }, { unique: true }).catch(() => {});
       cachedDb.collection('webhook_outbox').createIndex({ status: 1 }).catch(() => {});
 
@@ -150,6 +153,17 @@ async function getMongoDb(): Promise<Db | null> {
         if (count === 0 && cachedDb) {
           try {
             await cachedDb.collection('products').insertMany(INITIAL_PRODUCTS as any);
+          } catch {
+            // ignore
+          }
+        }
+      }).catch(() => {});
+
+      // Auto-seed categories collection if empty
+      cachedDb.collection('categories').countDocuments().then(async (count) => {
+        if (count === 0 && cachedDb) {
+          try {
+            await cachedDb.collection('categories').insertMany(INITIAL_CATEGORIES as any);
           } catch {
             // ignore
           }
@@ -838,58 +852,125 @@ export const serverDb = {
 
   // ===================== PRODUCTS =====================
 
-  async getAllProducts(): Promise<Product[]> {
+  async getAllProducts(onlyActive: boolean = false): Promise<Product[]> {
     const db = await getMongoDb();
+    let list: Product[] = [];
+
     if (db) {
       const docs = await db.collection('products').find({}).toArray();
       if (docs.length > 0) {
-        return docs.map((d: any) => {
+        list = docs.map((d: any) => {
           const { _id, ...rest } = d;
           return rest as Product;
         });
+      } else {
+        // Seed if empty
+        await db.collection('products').insertMany(INITIAL_PRODUCTS as any).catch(() => {});
+        list = INITIAL_PRODUCTS;
       }
-      // Seed if empty
-      await db.collection('products').insertMany(INITIAL_PRODUCTS as any).catch(() => {});
-      return INITIAL_PRODUCTS;
+    } else {
+      const state = ensureLocalFile();
+      if (!state.products || state.products.length === 0) {
+        state.products = INITIAL_PRODUCTS;
+        await saveLocalFile(state);
+      }
+      list = state.products;
     }
 
-    const state = ensureLocalFile();
-    if (!state.products || state.products.length === 0) {
-      state.products = INITIAL_PRODUCTS;
-      await saveLocalFile(state);
+    if (onlyActive) {
+      return list.filter((p: any) => (p.status === 'published' || p.status === 'active' || (!p.status && p.inStock !== false)) && p.published !== false);
     }
-    return state.products;
+    return list;
   },
 
   async getProductById(id: string): Promise<Product | null> {
-    const products = await this.getAllProducts();
+    const products = await this.getAllProducts(false);
     return products.find((p) => p.id === id || p.slug === id) || null;
   },
 
-  async saveProduct(product: Product): Promise<Product> {
+  async saveProduct(product: Partial<Product> & { published?: boolean }): Promise<Product> {
     const now = new Date().toISOString();
-    const updatedProduct = { ...product, updatedAt: now };
+    const id = product.id || `prod-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const slug = product.slug || product.name?.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || id;
+    const sku = product.sku || `KVN-${Date.now().toString().slice(-6)}`;
+
+    const rawVariants = product.variants && product.variants.length > 0 ? product.variants : [
+      { id: 'v1', weight: '250g', mrp: 140, sellingPrice: 120, stock: 20 },
+    ];
+    const variants = rawVariants.map((v: any, idx: number) => {
+      const sellingPrice = Number(v.sellingPrice ?? v.price ?? 120);
+      const mrp = Number(v.mrp ?? v.originalPrice ?? sellingPrice);
+      const stock = Number(v.stock !== undefined ? v.stock : 25);
+      return {
+        id: v.id || `var-${id}-${idx + 1}`,
+        weight: v.weight || '250g',
+        mrp,
+        sellingPrice,
+        stock,
+        sku: v.sku || `${sku}-${idx + 1}`,
+      };
+    });
+    const totalStock = variants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+    const resolvedStatus = product.published === false ? 'draft' : ((product.status as any) || 'published');
+    const inStock = totalStock > 0 && resolvedStatus !== 'archived';
+
+    const completeProduct: any = {
+      id,
+      sku,
+      name: product.name || 'KVN Special Tea Powder',
+      slug,
+      categorySlug: product.categorySlug || 'premium-tea',
+      mainCategory: product.mainCategory || 'tea',
+      brand: product.brand || 'KVN TEAPOWDER',
+      description: product.description || '',
+      brewingInstructions: product.brewingInstructions || '',
+      ingredients: product.ingredients || '',
+      images: product.images && product.images.length > 0 ? product.images : ['https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=800&q=80'],
+      variants,
+      inStock,
+      stockCount: totalStock,
+      price: variants[0]?.sellingPrice || 120,
+      isFeatured: Boolean(product.isFeatured),
+      isBestSeller: Boolean(product.isBestSeller),
+      isNewArrival: product.isNewArrival !== undefined ? Boolean(product.isNewArrival) : true,
+      status: resolvedStatus,
+      published: resolvedStatus === 'published',
+      createdAt: product.createdAt || now,
+      updatedAt: now,
+    };
 
     const db = await getMongoDb();
     if (db) {
       await db.collection('products').updateOne(
-        { id: product.id },
-        { $set: updatedProduct },
+        { id: completeProduct.id },
+        { $set: completeProduct },
         { upsert: true }
       );
-      return updatedProduct;
     }
 
     const state = ensureLocalFile();
     state.products = state.products || [];
-    const idx = state.products.findIndex((p) => p.id === product.id);
+    const idx = state.products.findIndex((p) => p.id === completeProduct.id);
     if (idx >= 0) {
-      state.products[idx] = updatedProduct;
+      state.products[idx] = completeProduct;
     } else {
-      state.products.push(updatedProduct);
+      state.products.push(completeProduct);
     }
     await saveLocalFile(state);
-    return updatedProduct;
+
+    return completeProduct;
+  },
+
+  async updateProduct(id: string, updates: Partial<Product> & { published?: boolean; inStock?: boolean; stockCount?: number; [key: string]: any }): Promise<Product | null> {
+    const existing = await this.getProductById(id);
+    if (!existing) return null;
+    const merged = { ...existing, ...updates, id, updatedAt: new Date().toISOString() };
+    if (updates.variants) {
+      const totalStock = updates.variants.reduce((sum: number, v: any) => sum + (Number(v.stock) || 0), 0);
+      merged.stockCount = totalStock;
+      merged.inStock = totalStock > 0 && merged.status !== 'archived';
+    }
+    return this.saveProduct(merged);
   },
 
   async deleteProduct(id: string): Promise<boolean> {
@@ -937,5 +1018,73 @@ export const serverDb = {
       }
     }
     await saveLocalFile(state);
+  },
+
+  // ===================== CATEGORIES =====================
+
+  async getAllCategories(): Promise<Category[]> {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection('categories').find({}).toArray();
+      if (docs.length > 0) {
+        return docs.map((d: any) => {
+          const { _id, ...rest } = d;
+          return rest as Category;
+        });
+      }
+      await db.collection('categories').insertMany(INITIAL_CATEGORIES as any).catch(() => {});
+      return INITIAL_CATEGORIES;
+    }
+
+    const state = ensureLocalFile();
+    if (!state.categories || state.categories.length === 0) {
+      state.categories = INITIAL_CATEGORIES;
+      await saveLocalFile(state);
+    }
+    return state.categories;
+  },
+
+  async saveCategory(category: Category): Promise<Category> {
+    const id = category.id || `cat-${Date.now()}`;
+    const cleanCat = { ...category, id };
+
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection('categories').updateOne(
+        { id },
+        { $set: cleanCat },
+        { upsert: true }
+      );
+    }
+
+    const state = ensureLocalFile();
+    state.categories = state.categories || [];
+    const idx = state.categories.findIndex((c) => c.id === id);
+    if (idx >= 0) {
+      state.categories[idx] = cleanCat;
+    } else {
+      state.categories.push(cleanCat);
+    }
+    await saveLocalFile(state);
+
+    return cleanCat;
+  },
+
+  async deleteCategory(id: string): Promise<boolean> {
+    const db = await getMongoDb();
+    if (db) {
+      const res = await db.collection('categories').deleteOne({ id });
+      return res.deletedCount > 0;
+    }
+
+    const state = ensureLocalFile();
+    if (!state.categories) return false;
+    const initialLen = state.categories.length;
+    state.categories = state.categories.filter((c) => c.id !== id);
+    if (state.categories.length !== initialLen) {
+      await saveLocalFile(state);
+      return true;
+    }
+    return false;
   },
 };
