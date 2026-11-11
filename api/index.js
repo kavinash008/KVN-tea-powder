@@ -33,6 +33,31 @@ var INITIAL_CATEGORIES = [
 ];
 var INITIAL_PRODUCTS = [
   {
+    id: "prod-briar-talayar",
+    sku: "BRIAR-TALAYAR-500G",
+    name: "Briar Talayar \u2013 Single Origin Tea",
+    slug: "briar-talayar-single-origin-tea",
+    categorySlug: "premium-tea",
+    mainCategory: "tea",
+    brand: "Briar",
+    description: "Briar Talayar Single Origin Tea is an exquisite high-elevation tea harvested from the mist-covered slopes of Munnar, Kerala. Crafted with single-origin handpicked tea leaves, it offers a rich golden liquor, brisk flavor, and natural freshness in every sip.",
+    brewingInstructions: "Bring fresh water and milk to a rolling boil in a 1:1 ratio. Add 1 teaspoon (2.5g) of Briar Talayar tea powder per cup. Simmer gently for 3-4 minutes to release the rich liquor and natural aroma. Add sugar or jaggery to taste, strain, and serve hot.",
+    ingredients: "100% Pure Single Origin High-Grown CTC Black Tea Leaves (Munnar, Kerala)",
+    images: [
+      "/products/briar-talayar-front.jpg",
+      "/products/briar-talayar-angle.jpg"
+    ],
+    variants: [
+      { id: "var-briar-500g", weight: "500g", mrp: 205, sellingPrice: 200, stock: 30 }
+    ],
+    isFeatured: true,
+    isBestSeller: true,
+    isNewArrival: true,
+    status: "published",
+    createdAt: "2026-11-10T08:00:00Z",
+    updatedAt: "2026-11-10T08:00:00Z"
+  },
+  {
     id: "prod-1",
     sku: "KVN-TEA-PREM-01",
     name: "KVN Premium Leaf Tea Powder",
@@ -55,7 +80,7 @@ var INITIAL_PRODUCTS = [
     isFeatured: true,
     isBestSeller: true,
     isNewArrival: false,
-    status: "published",
+    status: "draft",
     createdAt: "2026-08-01T08:00:00Z",
     updatedAt: "2026-09-01T10:00:00Z"
   },
@@ -82,7 +107,7 @@ var INITIAL_PRODUCTS = [
     isFeatured: true,
     isBestSeller: true,
     isNewArrival: false,
-    status: "published",
+    status: "draft",
     createdAt: "2026-08-05T08:00:00Z",
     updatedAt: "2026-09-01T10:00:00Z"
   },
@@ -109,7 +134,7 @@ var INITIAL_PRODUCTS = [
     isFeatured: true,
     isBestSeller: true,
     isNewArrival: false,
-    status: "published",
+    status: "draft",
     createdAt: "2026-08-10T08:00:00Z",
     updatedAt: "2026-09-01T10:00:00Z"
   },
@@ -135,7 +160,7 @@ var INITIAL_PRODUCTS = [
     isFeatured: false,
     isBestSeller: false,
     isNewArrival: true,
-    status: "published",
+    status: "draft",
     createdAt: "2026-08-28T08:00:00Z",
     updatedAt: "2026-09-08T10:00:00Z"
   },
@@ -160,7 +185,7 @@ var INITIAL_PRODUCTS = [
     isFeatured: true,
     isBestSeller: false,
     isNewArrival: true,
-    status: "published",
+    status: "draft",
     createdAt: "2026-09-02T08:00:00Z",
     updatedAt: "2026-09-09T10:00:00Z"
   },
@@ -185,7 +210,7 @@ var INITIAL_PRODUCTS = [
     isFeatured: false,
     isBestSeller: true,
     isNewArrival: false,
-    status: "published",
+    status: "draft",
     createdAt: "2026-08-12T08:00:00Z",
     updatedAt: "2026-08-12T08:00:00Z"
   }
@@ -451,15 +476,13 @@ var serverDb = {
     }
     if (db) {
       await db.collection("orders").insertOne(newOrder);
-      this.decrementProductStock(orderData.items).catch(() => {
-      });
+      await this.decrementProductStock(orderData.items).catch((e) => console.warn("Stock decrement warning:", e));
       return newOrder;
     }
     const state = ensureLocalFile();
     state.orders.unshift(newOrder);
     await saveLocalFile(state);
-    this.decrementProductStock(orderData.items).catch(() => {
-    });
+    await this.decrementProductStock(orderData.items).catch((e) => console.warn("Stock decrement warning:", e));
     return newOrder;
   },
   async updateOrderSyncStatuses(orderId, updates) {
@@ -909,19 +932,35 @@ var serverDb = {
     let list = [];
     if (db) {
       const docs = await db.collection("products").find({}).toArray();
-      if (docs.length > 0) {
-        list = docs.map((d) => {
+      const hasBriar = docs.some((d) => d.id === "prod-briar-talayar" || d.sku === "BRIAR-TALAYAR-500G");
+      if (!hasBriar || docs.length === 0) {
+        const briar = INITIAL_PRODUCTS.find((p) => p.id === "prod-briar-talayar") || INITIAL_PRODUCTS[0];
+        await db.collection("products").updateOne(
+          { id: briar.id },
+          { $set: briar },
+          { upsert: true }
+        ).catch(() => {
+        });
+        await db.collection("products").updateMany(
+          { id: { $ne: briar.id } },
+          { $set: { status: "draft", published: false } }
+        ).catch(() => {
+        });
+        const updatedDocs = await db.collection("products").find({}).toArray();
+        list = updatedDocs.map((d) => {
           const { _id, ...rest } = d;
           return rest;
         });
       } else {
-        await db.collection("products").insertMany(INITIAL_PRODUCTS).catch(() => {
+        list = docs.map((d) => {
+          const { _id, ...rest } = d;
+          return rest;
         });
-        list = INITIAL_PRODUCTS;
       }
     } else {
       const state = ensureLocalFile();
-      if (!state.products || state.products.length === 0) {
+      const hasBriar = state.products && state.products.some((p) => p.id === "prod-briar-talayar");
+      if (!hasBriar) {
         state.products = INITIAL_PRODUCTS;
         await saveLocalFile(state);
       }
@@ -942,15 +981,15 @@ var serverDb = {
     const slug = product.slug || product.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || id;
     const sku = product.sku || `KVN-${Date.now().toString().slice(-6)}`;
     const rawVariants = product.variants && product.variants.length > 0 ? product.variants : [
-      { id: "v1", weight: "250g", mrp: 140, sellingPrice: 120, stock: 20 }
+      { id: "v1", weight: "500g", mrp: 205, sellingPrice: 200, stock: 30 }
     ];
     const variants = rawVariants.map((v, idx2) => {
-      const sellingPrice = Number(v.sellingPrice ?? v.price ?? 120);
+      const sellingPrice = Number(v.sellingPrice ?? v.price ?? 200);
       const mrp = Number(v.mrp ?? v.originalPrice ?? sellingPrice);
-      const stock = Number(v.stock !== void 0 ? v.stock : 25);
+      const stock = Number(v.stock !== void 0 ? v.stock : 0);
       return {
         id: v.id || `var-${id}-${idx2 + 1}`,
-        weight: v.weight || "250g",
+        weight: v.weight || "500g",
         mrp,
         sellingPrice,
         stock,
@@ -1035,12 +1074,31 @@ var serverDb = {
     const db = await getMongoDb();
     if (db) {
       for (const item of items) {
-        if (!item.productId || !item.variantId) continue;
-        await db.collection("products").updateOne(
-          { id: item.productId, "variants.id": item.variantId },
-          { $inc: { "variants.$.stock": -(item.quantity || 1) } }
-        ).catch(() => {
-        });
+        if (!item.productId) continue;
+        const prodDoc = await db.collection("products").findOne({ id: item.productId });
+        if (prodDoc && Array.isArray(prodDoc.variants)) {
+          const updatedVariants = prodDoc.variants.map((v) => {
+            if (v.id === item.variantId || v.weight === item.weight) {
+              const current = Number(v.stock) || 0;
+              const qty = Math.max(1, Number(item.quantity) || 1);
+              return { ...v, stock: Math.max(0, current - qty) };
+            }
+            return v;
+          });
+          const totalStock = updatedVariants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+          await db.collection("products").updateOne(
+            { id: item.productId },
+            {
+              $set: {
+                variants: updatedVariants,
+                stockCount: totalStock,
+                inStock: totalStock > 0 && prodDoc.status !== "archived",
+                updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+              }
+            }
+          ).catch(() => {
+          });
+        }
       }
       return;
     }
@@ -1049,10 +1107,14 @@ var serverDb = {
     for (const item of items) {
       const prod = state.products.find((p) => p.id === item.productId);
       if (prod && prod.variants) {
-        const variant = prod.variants.find((v) => v.id === item.variantId);
+        const variant = prod.variants.find((v) => v.id === item.variantId || v.weight === item.weight);
         if (variant) {
-          variant.stock = Math.max(0, variant.stock - (item.quantity || 1));
+          variant.stock = Math.max(0, (Number(variant.stock) || 0) - Math.max(1, Number(item.quantity) || 1));
         }
+        const totalStock = prod.variants.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+        prod.stockCount = totalStock;
+        prod.inStock = totalStock > 0 && prod.status !== "archived";
+        prod.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
       }
     }
     await saveLocalFile(state);

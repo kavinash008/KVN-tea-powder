@@ -68,6 +68,11 @@ export const ProductCard: React.FC<ProductCardProps> = ({
               Customer Favourite
             </span>
           )}
+          {product.isFeatured && (
+            <span className="px-2.5 py-0.5 text-[10px] sm:text-[11px] font-semibold bg-emerald-800 text-white rounded-full tracking-wide shadow-2xs">
+              Featured Product
+            </span>
+          )}
           {discountPercent > 0 && (
             <span className="px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded-md">
               {discountPercent}% OFF

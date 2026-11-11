@@ -524,10 +524,10 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
-    // Verify stock limit
-    const products = db.getProducts();
+    // Verify stock limit against live database products
+    const activeProds = products && products.length > 0 ? products : db.getProducts();
     let maxStock = 999;
-    for (const p of products) {
+    for (const p of activeProds) {
       const v = p.variants.find((vr) => vr.id === variantId);
       if (v) {
         maxStock = v.stock;

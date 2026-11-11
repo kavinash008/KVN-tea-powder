@@ -305,15 +305,14 @@ export const serverDb = {
 
     if (db) {
       await db.collection('orders').insertOne(newOrder as any);
-      // Decrement stock in background
-      this.decrementProductStock(orderData.items).catch(() => {});
+      await this.decrementProductStock(orderData.items).catch((e) => console.warn('Stock decrement warning:', e));
       return newOrder;
     }
 
     const state = ensureLocalFile();
     state.orders.unshift(newOrder);
     await saveLocalFile(state);
-    this.decrementProductStock(orderData.items).catch(() => {});
+    await this.decrementProductStock(orderData.items).catch((e) => console.warn('Stock decrement warning:', e));
     return newOrder;
   },
 
@@ -858,19 +857,35 @@ export const serverDb = {
 
     if (db) {
       const docs = await db.collection('products').find({}).toArray();
-      if (docs.length > 0) {
-        list = docs.map((d: any) => {
+      const hasBriar = docs.some((d: any) => d.id === 'prod-briar-talayar' || d.sku === 'BRIAR-TALAYAR-500G');
+      if (!hasBriar || docs.length === 0) {
+        const briar = INITIAL_PRODUCTS.find((p) => p.id === 'prod-briar-talayar') || INITIAL_PRODUCTS[0];
+        await db.collection('products').updateOne(
+          { id: briar.id },
+          { $set: briar },
+          { upsert: true }
+        ).catch(() => {});
+        // Deactivate other existing products without permanently deleting them
+        await db.collection('products').updateMany(
+          { id: { $ne: briar.id } },
+          { $set: { status: 'draft', published: false } }
+        ).catch(() => {});
+
+        const updatedDocs = await db.collection('products').find({}).toArray();
+        list = updatedDocs.map((d: any) => {
           const { _id, ...rest } = d;
           return rest as Product;
         });
       } else {
-        // Seed if empty
-        await db.collection('products').insertMany(INITIAL_PRODUCTS as any).catch(() => {});
-        list = INITIAL_PRODUCTS;
+        list = docs.map((d: any) => {
+          const { _id, ...rest } = d;
+          return rest as Product;
+        });
       }
     } else {
       const state = ensureLocalFile();
-      if (!state.products || state.products.length === 0) {
+      const hasBriar = state.products && state.products.some((p: any) => p.id === 'prod-briar-talayar');
+      if (!hasBriar) {
         state.products = INITIAL_PRODUCTS;
         await saveLocalFile(state);
       }
@@ -895,15 +910,15 @@ export const serverDb = {
     const sku = product.sku || `KVN-${Date.now().toString().slice(-6)}`;
 
     const rawVariants = product.variants && product.variants.length > 0 ? product.variants : [
-      { id: 'v1', weight: '250g', mrp: 140, sellingPrice: 120, stock: 20 },
+      { id: 'v1', weight: '500g', mrp: 205, sellingPrice: 200, stock: 30 },
     ];
     const variants = rawVariants.map((v: any, idx: number) => {
-      const sellingPrice = Number(v.sellingPrice ?? v.price ?? 120);
+      const sellingPrice = Number(v.sellingPrice ?? v.price ?? 200);
       const mrp = Number(v.mrp ?? v.originalPrice ?? sellingPrice);
-      const stock = Number(v.stock !== undefined ? v.stock : 25);
+      const stock = Number(v.stock !== undefined ? v.stock : 0);
       return {
         id: v.id || `var-${id}-${idx + 1}`,
-        weight: v.weight || '250g',
+        weight: v.weight || '500g',
         mrp,
         sellingPrice,
         stock,
@@ -997,11 +1012,30 @@ export const serverDb = {
 
     if (db) {
       for (const item of items) {
-        if (!item.productId || !item.variantId) continue;
-        await db.collection('products').updateOne(
-          { id: item.productId, 'variants.id': item.variantId },
-          { $inc: { 'variants.$.stock': -(item.quantity || 1) } }
-        ).catch(() => {});
+        if (!item.productId) continue;
+        const prodDoc = await db.collection('products').findOne({ id: item.productId });
+        if (prodDoc && Array.isArray(prodDoc.variants)) {
+          const updatedVariants = prodDoc.variants.map((v: any) => {
+            if (v.id === item.variantId || v.weight === item.weight) {
+              const current = Number(v.stock) || 0;
+              const qty = Math.max(1, Number(item.quantity) || 1);
+              return { ...v, stock: Math.max(0, current - qty) };
+            }
+            return v;
+          });
+          const totalStock = updatedVariants.reduce((sum: number, v: any) => sum + (Number(v.stock) || 0), 0);
+          await db.collection('products').updateOne(
+            { id: item.productId },
+            {
+              $set: {
+                variants: updatedVariants,
+                stockCount: totalStock,
+                inStock: totalStock > 0 && prodDoc.status !== 'archived',
+                updatedAt: new Date().toISOString(),
+              },
+            }
+          ).catch(() => {});
+        }
       }
       return;
     }
@@ -1009,12 +1043,16 @@ export const serverDb = {
     const state = ensureLocalFile();
     if (!state.products) return;
     for (const item of items) {
-      const prod = state.products.find((p) => p.id === item.productId);
+      const prod: any = state.products.find((p) => p.id === item.productId);
       if (prod && prod.variants) {
-        const variant = prod.variants.find((v) => v.id === item.variantId);
+        const variant = prod.variants.find((v: any) => v.id === item.variantId || v.weight === item.weight);
         if (variant) {
-          variant.stock = Math.max(0, variant.stock - (item.quantity || 1));
+          variant.stock = Math.max(0, (Number(variant.stock) || 0) - Math.max(1, Number(item.quantity) || 1));
         }
+        const totalStock = prod.variants.reduce((sum: number, v: any) => sum + (Number(v.stock) || 0), 0);
+        prod.stockCount = totalStock;
+        prod.inStock = totalStock > 0 && prod.status !== 'archived';
+        prod.updatedAt = new Date().toISOString();
       }
     }
     await saveLocalFile(state);

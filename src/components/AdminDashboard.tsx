@@ -607,7 +607,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                                 </span>
                                 <button
                                   onClick={async () => {
-                                    const newStock = totalStock === 0 ? 25 : 0;
+                                    let newStock: number;
+                                    if (totalStock === 0) {
+                                      const entered = window.prompt(`Enter restock quantity for "${prod.name}":`, '30');
+                                      if (entered === null) return;
+                                      newStock = Math.max(0, parseInt(entered, 10) || 0);
+                                    } else {
+                                      if (!window.confirm(`Mark "${prod.name}" as Out of Stock (0 units)?`)) return;
+                                      newStock = 0;
+                                    }
                                     const updatedVariants = prod.variants.map((v) => ({ ...v, stock: newStock }));
                                     try {
                                       const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
@@ -615,13 +623,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                                       setProducts((prev) => prev.map((p) => p.id === prod.id ? updated : p));
                                       db.saveProduct(updated);
                                       window.dispatchEvent(new Event('kvn_products_updated'));
-                                      showAdminToast(totalStock === 0 ? `Restocked "${prod.name}" (25 units)` : `Marked "${prod.name}" as Out of Stock`);
+                                      showAdminToast(newStock > 0 ? `Restocked "${prod.name}" to ${newStock} units` : `Marked "${prod.name}" as Out of Stock`);
                                     } catch (err: any) {
                                       showAdminToast(`Failed to update stock: ${err?.message}`);
                                     }
                                   }}
                                   className="text-[10px] text-stone-500 hover:text-stone-900 underline ml-1 cursor-pointer"
-                                  title={totalStock === 0 ? "Restock 25 units" : "Mark Out of Stock (0)"}
+                                  title={totalStock === 0 ? "Enter restock quantity" : "Set Out of Stock (0)"}
                                 >
                                   {totalStock === 0 ? "Restock" : "Set 0"}
                                 </button>

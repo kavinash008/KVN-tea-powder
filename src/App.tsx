@@ -14,6 +14,7 @@ import { FeedbackPage } from './components/FeedbackPage';
 import { ContactPage } from './components/ContactPage';
 import { CustomerAccountModal } from './components/CustomerAccountModal';
 import { AdminDashboard } from './components/AdminDashboard';
+import { SingleProductSpotlight } from './components/SingleProductSpotlight';
 import { useScrollReveal } from './lib/useScrollReveal';
 import { Product, Order } from './types';
 import { 
@@ -582,12 +583,12 @@ function AppContent() {
                     <div className="flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-3 pt-3">
                       <button
                         onClick={() => {
-                          const el = document.getElementById('catalog-section');
+                          const el = document.getElementById('single-product-spotlight') || document.getElementById('catalog-section');
                           el?.scrollIntoView({ behavior: 'smooth' });
                         }}
                         className="w-full sm:w-auto px-7 py-3.5 bg-[#c29958] hover:bg-[#d4a867] active:scale-95 text-stone-950 font-bold text-xs sm:text-sm rounded-xl transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer"
                       >
-                        Explore Powders <ArrowRight className="w-4 h-4" />
+                        Explore Briar Talayar <ArrowRight className="w-4 h-4" />
                       </button>
 
                       <a
@@ -606,19 +607,19 @@ function AppContent() {
                   <div className="lg:col-span-5 relative scroll-reveal delay-100">
                     <div className="relative rounded-3xl overflow-hidden shadow-2xl border-4 border-white/10 aspect-4/3 sm:aspect-5/4">
                       <img
-                        src="https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=1000&q=85"
+                        src={allProducts.length <= 1 && allProducts[0]?.images?.[0] ? allProducts[0].images[0] : "https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=1000&q=85"}
                         alt="KVN Tea & Coffee powders"
-                        className="w-full h-full object-cover"
+                        className={allProducts.length <= 1 ? "w-full h-full object-contain bg-stone-50 p-3" : "w-full h-full object-cover"}
                       />
                       <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-transparent flex flex-col justify-end p-5 sm:p-6">
                         <span className="text-xs font-bold text-amber-300 uppercase tracking-wider">
-                          KVN Signature Selection
+                          {allProducts.length <= 1 && allProducts[0] ? `${allProducts[0].brand} • 500g Single Origin Tea` : 'KVN Signature Selection'}
                         </span>
                         <h3 className="text-base sm:text-xl font-bold text-white mt-1">
-                          Strong Decoction & Rich Natural Froth
+                          {allProducts.length <= 1 && allProducts[0] ? allProducts[0].name : 'Strong Decoction & Rich Natural Froth'}
                         </h3>
                         <p className="text-xs text-stone-200 mt-1">
-                          Freshly ground Nilgiri Tea & Coorg Filter Coffee.
+                          {allProducts.length <= 1 && allProducts[0] ? `Special Offer: ₹${allProducts[0].variants?.[0]?.sellingPrice || 200} (MRP ₹${allProducts[0].variants?.[0]?.mrp || 205})` : 'Freshly ground Nilgiri Tea & Coorg Filter Coffee.'}
                         </p>
                       </div>
                     </div>
@@ -680,7 +681,16 @@ function AppContent() {
               </div>
             </section>
 
-            {/* NEW ARRIVALS */}
+            {/* SINGLE PRODUCT SPOTLIGHT (When 1 product active) OR MULTI-PRODUCT CATALOG */}
+            {allProducts.length <= 1 && allProducts[0] ? (
+              <SingleProductSpotlight
+                product={allProducts[0]}
+                onNavigateToCheckout={() => navigateTo('checkout')}
+                onSelectProduct={(p) => setSelectedProduct(p)}
+              />
+            ) : (
+              <>
+                {/* NEW ARRIVALS */}
             {newArrivals.length > 0 && (
               <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                 <div className="flex items-center justify-between mb-6 scroll-reveal">
@@ -755,7 +765,13 @@ function AppContent() {
               </div>
 
               {/* Product Grid */}
-              {filteredProducts.length === 0 ? (
+              {allProducts.length <= 1 && filteredProducts.length === 1 ? (
+              <SingleProductSpotlight
+                product={filteredProducts[0]}
+                onNavigateToCheckout={() => navigateTo('checkout')}
+                onSelectProduct={(p) => setSelectedProduct(p)}
+              />
+            ) : filteredProducts.length === 0 ? (
                 <div className="bg-white rounded-3xl p-12 border border-stone-200 text-center max-w-md mx-auto space-y-3">
                   <Leaf className="w-12 h-12 text-stone-300 mx-auto" />
                   <h3 className="font-bold text-stone-800 text-sm">No products found</h3>
@@ -784,6 +800,9 @@ function AppContent() {
                 </div>
               )}
             </section>
+
+              </>
+            )}
 
             {/* FOUNDER & STORY SECTION */}
             <section id="founder-story-section" className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 scroll-mt-24">
@@ -876,7 +895,13 @@ function AppContent() {
               </div>
             </div>
 
-            {filteredProducts.length === 0 ? (
+            {allProducts.length <= 1 && filteredProducts.length === 1 ? (
+              <SingleProductSpotlight
+                product={filteredProducts[0]}
+                onNavigateToCheckout={() => navigateTo('checkout')}
+                onSelectProduct={(p) => setSelectedProduct(p)}
+              />
+            ) : filteredProducts.length === 0 ? (
               <div className="bg-white rounded-3xl p-12 border border-stone-200 text-center max-w-md mx-auto space-y-3">
                 <Leaf className="w-12 h-12 text-stone-300 mx-auto" />
                 <h3 className="font-bold text-stone-800 text-sm">No products found</h3>

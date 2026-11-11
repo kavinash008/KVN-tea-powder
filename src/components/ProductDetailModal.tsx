@@ -155,6 +155,30 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
               {product.name}
             </h1>
 
+            {/* Promotional Badges */}
+            <div className="flex flex-wrap items-center gap-1.5 my-2">
+              {product.isNewArrival && (
+                <span className="px-2.5 py-0.5 text-xs font-semibold bg-[#143728] text-white rounded-full tracking-wide shadow-2xs">
+                  New Arrival
+                </span>
+              )}
+              {product.isBestSeller && (
+                <span className="px-2.5 py-0.5 text-xs font-semibold bg-[#c29958] text-[#143728] rounded-full tracking-wide shadow-2xs">
+                  Customer Favourite
+                </span>
+              )}
+              {product.isFeatured && (
+                <span className="px-2.5 py-0.5 text-xs font-semibold bg-emerald-800 text-white rounded-full tracking-wide shadow-2xs">
+                  Featured Product
+                </span>
+              )}
+              {selectedVariant.mrp > selectedVariant.sellingPrice && (
+                <span className="px-2.5 py-0.5 text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded-full">
+                  Save ₹{selectedVariant.mrp - selectedVariant.sellingPrice}
+                </span>
+              )}
+            </div>
+
             {/* Price & Stock */}
             <div className="flex items-baseline gap-3 my-3">
               <span className="text-2xl sm:text-3xl font-bold text-stone-900">
@@ -174,7 +198,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
             <div className="mb-4">
               {isOutOfStock ? (
                 <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-red-600 bg-red-50 px-2.5 py-1 rounded-md">
-                  <AlertCircle className="w-3.5 h-3.5" /> Currently Out of Stock
+                  <AlertCircle className="w-3.5 h-3.5" /> Out of Stock
                 </span>
               ) : selectedVariant.stock <= 5 ? (
                 <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-md">
@@ -182,7 +206,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-md">
-                  <Check className="w-3.5 h-3.5" /> Fresh Batch in Stock
+                  <Check className="w-3.5 h-3.5" /> In Stock: {selectedVariant.stock} packets available
                 </span>
               )}
             </div>

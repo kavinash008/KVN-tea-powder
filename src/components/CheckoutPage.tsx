@@ -526,6 +526,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
       );
 
       clearCart();
+      window.dispatchEvent(new Event('kvn_products_updated'));
       showToast('Order placed successfully! Saved to shared database.');
       onOrderSuccess(createdOrder);
     } catch (err: any) {
