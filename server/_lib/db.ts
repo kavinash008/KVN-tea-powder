@@ -310,7 +310,7 @@ export const serverDb = {
 
     const envUpi = (process.env.MERCHANT_UPI_ID || '').trim();
     const envMerchant = (process.env.MERCHANT_UPI_NAME || '').trim();
-    const effectiveUpiId = (merged.upiId || envUpi || '').trim();
+    const effectiveUpiId = (stored?.upiId || envUpi || INITIAL_BUSINESS_CONFIG.upiId || '').trim();
     const effectiveMerchantName = (merged.merchantName || envMerchant || 'KVN Tea Powder').trim() || 'KVN Tea Powder';
 
     return {

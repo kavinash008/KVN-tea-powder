@@ -439,6 +439,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
     const res = await loginWithGoogle();
     setAuthSubmitting(false);
     if (!res.success) {
+      if (res.isUnauthorizedDomain) setCheckoutAuthMethod('password');
       setAuthError(res.error || 'Google Sign-In failed');
     }
   };
@@ -458,6 +459,7 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
       setConfirmationResult(res.confirmationResult);
       setOtpSent(true);
     } else {
+      if (res.isUnauthorizedDomain) setCheckoutAuthMethod('password');
       setAuthError(res.error || 'Failed to send OTP. Please check your number.');
     }
   };

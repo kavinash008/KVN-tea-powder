@@ -15,6 +15,7 @@ import {
   RecaptchaVerifier,
   signInWithPhoneNumber,
   isFirebaseConfigured,
+  formatFirebaseAuthError,
 } from '../lib/firebase';
 
 interface ShopContextType {
@@ -57,12 +58,12 @@ interface ShopContextType {
     email?: string;
     initialAddress?: Partial<CustomerAddress>;
   }) => Promise<{ success: boolean; error?: string }>;
-  loginWithGoogle: () => Promise<{ success: boolean; error?: string }>;
-  loginWithEmail: (email: string, pass: string) => Promise<{ success: boolean; error?: string }>;
-  registerWithEmail: (email: string, pass: string, fullName: string, phone?: string) => Promise<{ success: boolean; error?: string }>;
-  sendPasswordReset: (email: string) => Promise<{ success: boolean; error?: string }>;
-  sendPhoneOtp: (phone: string, containerId: string) => Promise<{ success: boolean; confirmationResult?: any; error?: string }>;
-  verifyPhoneOtp: (confirmationResult: any, code: string, fullName?: string) => Promise<{ success: boolean; error?: string }>;
+  loginWithGoogle: () => Promise<{ success: boolean; error?: string; isUnauthorizedDomain?: boolean }>;
+  loginWithEmail: (email: string, pass: string) => Promise<{ success: boolean; error?: string; isUnauthorizedDomain?: boolean }>;
+  registerWithEmail: (email: string, pass: string, fullName: string, phone?: string) => Promise<{ success: boolean; error?: string; isUnauthorizedDomain?: boolean }>;
+  sendPasswordReset: (email: string) => Promise<{ success: boolean; error?: string; isUnauthorizedDomain?: boolean }>;
+  sendPhoneOtp: (phone: string, containerId: string) => Promise<{ success: boolean; confirmationResult?: any; error?: string; isUnauthorizedDomain?: boolean }>;
+  verifyPhoneOtp: (confirmationResult: any, code: string, fullName?: string) => Promise<{ success: boolean; error?: string; isUnauthorizedDomain?: boolean }>;
   logoutCustomer: () => void;
   refreshUserProfile: () => Promise<void>;
   addSavedAddress: (address: Omit<CustomerAddress, 'id'>) => Promise<CustomerAddress | null>;
@@ -274,7 +275,7 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const loginWithGoogle = async (): Promise<{ success: boolean; error?: string }> => {
+  const loginWithGoogle = async (): Promise<{ success: boolean; error?: string; isUnauthorizedDomain?: boolean }> => {
     try {
       if (!auth) throw new Error('Firebase Auth is not initialized');
       const provider = new GoogleAuthProvider();
@@ -302,11 +303,12 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return { success: true };
     } catch (err: any) {
       console.error('Google Sign-In error:', err);
-      return { success: false, error: err.message || 'Google Sign-In failed' };
+      const formatted = formatFirebaseAuthError(err, 'Google Sign-In failed');
+      return { success: false, error: formatted.message, isUnauthorizedDomain: formatted.isUnauthorizedDomain };
     }
   };
 
-  const loginWithEmail = async (email: string, pass: string): Promise<{ success: boolean; error?: string }> => {
+  const loginWithEmail = async (email: string, pass: string): Promise<{ success: boolean; error?: string; isUnauthorizedDomain?: boolean }> => {
     try {
       if (!auth) throw new Error('Firebase Auth is not initialized');
       const result = await signInWithEmailAndPassword(auth, email.trim(), pass);
@@ -330,7 +332,8 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       showToast(`Welcome back, ${user.fullName}!`);
       return { success: true };
     } catch (err: any) {
-      return { success: false, error: err.message || 'Email sign-in failed' };
+      const formatted = formatFirebaseAuthError(err, 'Email sign-in failed');
+      return { success: false, error: formatted.message, isUnauthorizedDomain: formatted.isUnauthorizedDomain };
     }
   };
 
@@ -339,7 +342,7 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     pass: string,
     fullName: string,
     phone?: string
-  ): Promise<{ success: boolean; error?: string }> => {
+  ): Promise<{ success: boolean; error?: string; isUnauthorizedDomain?: boolean }> => {
     try {
       if (!auth) throw new Error('Firebase Auth is not initialized');
       const result = await createUserWithEmailAndPassword(auth, email.trim(), pass);
@@ -370,22 +373,24 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       showToast(`Account created! A verification email was sent to ${email}`);
       return { success: true };
     } catch (err: any) {
-      return { success: false, error: err.message || 'Registration failed' };
+      const formatted = formatFirebaseAuthError(err, 'Registration failed');
+      return { success: false, error: formatted.message, isUnauthorizedDomain: formatted.isUnauthorizedDomain };
     }
   };
 
-  const sendPasswordReset = async (email: string): Promise<{ success: boolean; error?: string }> => {
+  const sendPasswordReset = async (email: string): Promise<{ success: boolean; error?: string; isUnauthorizedDomain?: boolean }> => {
     try {
       if (!auth) throw new Error('Firebase Auth is not initialized');
       await sendPasswordResetEmail(auth, email.trim());
       showToast(`Password recovery link sent to ${email}`);
       return { success: true };
     } catch (err: any) {
-      return { success: false, error: err.message || 'Failed to send password reset email' };
+      const formatted = formatFirebaseAuthError(err, 'Failed to send password reset email');
+      return { success: false, error: formatted.message, isUnauthorizedDomain: formatted.isUnauthorizedDomain };
     }
   };
 
-  const sendPhoneOtp = async (phone: string, containerId: string): Promise<{ success: boolean; confirmationResult?: any; error?: string }> => {
+  const sendPhoneOtp = async (phone: string, containerId: string): Promise<{ success: boolean; confirmationResult?: any; error?: string; isUnauthorizedDomain?: boolean }> => {
     try {
       if (!auth) throw new Error('Firebase Auth is not initialized');
       const cleanPhone = phone.replace(/\D/g, '').slice(-10);
@@ -407,11 +412,12 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return { success: true, confirmationResult };
     } catch (err: any) {
       console.error('Phone OTP error:', err);
-      return { success: false, error: err.message || 'Failed to send OTP' };
+      const formatted = formatFirebaseAuthError(err, 'Failed to send OTP');
+      return { success: false, error: formatted.message, isUnauthorizedDomain: formatted.isUnauthorizedDomain };
     }
   };
 
-  const verifyPhoneOtp = async (confirmationResult: any, code: string, fullName?: string): Promise<{ success: boolean; error?: string }> => {
+  const verifyPhoneOtp = async (confirmationResult: any, code: string, fullName?: string): Promise<{ success: boolean; error?: string; isUnauthorizedDomain?: boolean }> => {
     try {
       if (!confirmationResult) throw new Error('No active OTP request found');
       const result = await confirmationResult.confirm(code);
@@ -435,7 +441,8 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       showToast(`Phone verified! Welcome, ${user.fullName}`);
       return { success: true };
     } catch (err: any) {
-      return { success: false, error: err.message || 'Invalid OTP code' };
+      const formatted = formatFirebaseAuthError(err, 'Invalid OTP code');
+      return { success: false, error: formatted.message, isUnauthorizedDomain: formatted.isUnauthorizedDomain };
     }
   };
 

@@ -141,6 +141,7 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
     const res = await loginWithGoogle();
     setSubmitting(false);
     if (!res.success) {
+      if (res.isUnauthorizedDomain) setAuthMethod('password');
       setFormError(res.error || 'Google Sign-In failed');
     }
   };
@@ -160,6 +161,7 @@ export const CustomerAccountModal: React.FC<CustomerAccountModalProps> = ({
       setConfirmationResult(res.confirmationResult);
       setOtpSent(true);
     } else {
+      if (res.isUnauthorizedDomain) setAuthMethod('password');
       setFormError(res.error || 'Failed to send OTP. Please check your number.');
     }
   };

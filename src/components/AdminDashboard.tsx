@@ -1984,7 +1984,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                         type="text"
                         value={config.upiId || ''}
                         onChange={(e) => setConfig({ ...config, upiId: e.target.value })}
-                        placeholder="e.g. kavinash@okicici or 6383050287@ybl"
+                        placeholder="e.g. kavinashk008-1@oksbi"
                         className="w-full px-3 py-2 bg-white border border-amber-200 rounded-xl font-mono text-xs"
                       />
                     </div>
@@ -1999,6 +1999,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                       />
                     </div>
                   </div>
+
+                  {(!config.upiId || config.upiId.trim().toLowerCase() === 'kavinashk008-1@oksbi') && (
+                    <div className="flex items-center gap-3 p-2.5 bg-white border border-amber-200 rounded-xl text-[11px]">
+                      <img
+                        src="/payments/kvn-gpay-qr.png"
+                        alt="Kavinash K GPay QR"
+                        className="w-14 h-16 object-contain rounded-lg border border-stone-200 shrink-0"
+                      />
+                      <div className="text-stone-700 space-y-0.5">
+                        <div className="font-bold text-stone-900">Linked Official Google Pay QR Card</div>
+                        <div>
+                          Display Name: <strong>Kavinash K</strong> • VPA:{' '}
+                          <span className="font-mono font-semibold">kavinashk008-1@oksbi</span>
+                        </div>
+                        <div className="text-stone-500">
+                          Customers automatically receive both dynamic exact-amount UPI QR codes and this official GPay QR option.
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Official WhatsApp Business Cloud API Status & Outbox */}

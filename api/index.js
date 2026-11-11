@@ -18,9 +18,9 @@ var INITIAL_BUSINESS_CONFIG = {
   freeDeliveryThreshold: 500,
   fssaiNumber: "",
   gstNumber: "",
-  upiId: "",
+  upiId: "kavinashk008-1@oksbi",
   merchantName: "KVN Tea Powder",
-  upiConfigured: false
+  upiConfigured: true
 };
 var INITIAL_CATEGORIES = [
   { id: "cat-1", name: "Premium Tea Powder", slug: "premium-tea", mainCategory: "tea", description: "Selected high-elevation CTC leaves for brisk, rich liquor and deep aroma." },
@@ -755,7 +755,7 @@ var serverDb = {
     };
     const envUpi = (process.env.MERCHANT_UPI_ID || "").trim();
     const envMerchant = (process.env.MERCHANT_UPI_NAME || "").trim();
-    const effectiveUpiId = (merged.upiId || envUpi || "").trim();
+    const effectiveUpiId = (stored?.upiId || envUpi || INITIAL_BUSINESS_CONFIG.upiId || "").trim();
     const effectiveMerchantName = (merged.merchantName || envMerchant || "KVN Tea Powder").trim() || "KVN Tea Powder";
     return {
       ...merged,

@@ -68,3 +68,73 @@ export type { ConfirmationResult, FirebaseUser };
 export function isFirebaseConfigured(): boolean {
   return Boolean(firebaseConfig.apiKey && firebaseConfig.apiKey !== '' && firebaseConfig.projectId);
 }
+
+/**
+ * Translates raw Firebase Auth SDK errors (like auth/unauthorized-domain)
+ * into actionable, user-friendly guidance.
+ */
+export function formatFirebaseAuthError(
+  err: any,
+  fallbackMessage: string = 'Authentication failed'
+): { message: string; isUnauthorizedDomain: boolean; code: string } {
+  const code = String(err?.code || '');
+  const rawMessage = String(err?.message || '');
+  const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+
+  if (code === 'auth/unauthorized-domain' || rawMessage.includes('auth/unauthorized-domain')) {
+    return {
+      code: 'auth/unauthorized-domain',
+      isUnauthorizedDomain: true,
+      message:
+        `Google / Phone OTP sign-in is not enabled yet for "${host}" (Firebase domain authorization required). ` +
+        `Please sign in or create an account using "Mobile + Pass" below (works immediately), or ask Kavinash to add "${host}" in Firebase Console → Authentication → Settings → Authorized domains.`,
+    };
+  }
+  if (code === 'auth/popup-blocked') {
+    return {
+      code,
+      isUnauthorizedDomain: false,
+      message: 'Pop-up was blocked by your browser. Please allow pop-ups or use "Mobile + Pass" below.',
+    };
+  }
+  if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+    return {
+      code,
+      isUnauthorizedDomain: false,
+      message: 'Google Sign-In window was closed before completing sign-in.',
+    };
+  }
+  if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
+    return {
+      code,
+      isUnauthorizedDomain: false,
+      message: 'Invalid email or password. Please double-check your credentials.',
+    };
+  }
+  if (code === 'auth/email-already-in-use') {
+    return {
+      code,
+      isUnauthorizedDomain: false,
+      message: 'An account already exists with this email. Please switch to Sign In.',
+    };
+  }
+  if (code === 'auth/operation-not-allowed') {
+    return {
+      code,
+      isUnauthorizedDomain: false,
+      message: 'This sign-in provider is not enabled yet in Firebase Authentication. Please use "Mobile + Pass" below.',
+    };
+  }
+  if (code === 'auth/too-many-requests') {
+    return {
+      code,
+      isUnauthorizedDomain: false,
+      message: 'Too many attempts. Please wait a minute or sign in using "Mobile + Pass".',
+    };
+  }
+  return {
+    code,
+    isUnauthorizedDomain: false,
+    message: rawMessage || fallbackMessage,
+  };
+}

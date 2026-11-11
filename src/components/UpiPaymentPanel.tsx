@@ -64,6 +64,7 @@ function compressScreenshot(file: File): Promise<string> {
 export const UpiPaymentPanel: React.FC<UpiPaymentPanelProps> = ({ order, onOrderUpdated }) => {
   const { config, showToast } = useShop();
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
+  const [qrMode, setQrMode] = useState<'dynamic' | 'gpay'>('dynamic');
   const [copiedUpi, setCopiedUpi] = useState(false);
 
   // Payment submission form state
@@ -396,7 +397,46 @@ export const UpiPaymentPanel: React.FC<UpiPaymentPanelProps> = ({ order, onOrder
                 <div className="text-xs font-bold text-[#143728]">
                   Scan & Pay Exact ₹{order.totalAmount}
                 </div>
-                {qrDataUrl ? (
+
+                {(!upiInfo.upiId || upiInfo.upiId.toLowerCase() === 'kavinashk008-1@oksbi') && (
+                  <div className="grid grid-cols-2 gap-1 p-1 bg-stone-100 rounded-xl text-[11px] font-semibold">
+                    <button
+                      type="button"
+                      onClick={() => setQrMode('dynamic')}
+                      className={`py-1.5 px-2 rounded-lg transition-all cursor-pointer ${
+                        qrMode === 'dynamic'
+                          ? 'bg-white text-[#143728] shadow-2xs font-bold'
+                          : 'text-stone-600 hover:text-stone-900'
+                      }`}
+                    >
+                      Dynamic QR (₹{order.totalAmount})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setQrMode('gpay')}
+                      className={`py-1.5 px-2 rounded-lg transition-all cursor-pointer ${
+                        qrMode === 'gpay'
+                          ? 'bg-white text-[#143728] shadow-2xs font-bold'
+                          : 'text-stone-600 hover:text-stone-900'
+                      }`}
+                    >
+                      Official GPay QR
+                    </button>
+                  </div>
+                )}
+
+                {qrMode === 'gpay' && upiInfo.upiId?.toLowerCase() === 'kavinashk008-1@oksbi' ? (
+                  <div className="space-y-2">
+                    <img
+                      src="/payments/kvn-gpay-qr.png"
+                      alt="Official Google Pay QR - Kavinash K (kavinashk008-1@oksbi)"
+                      className="w-56 max-h-72 object-contain mx-auto rounded-xl border border-stone-200 bg-white shadow-2xs"
+                    />
+                    <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                      Using direct GPay QR card: please enter exact <strong>₹{order.totalAmount}</strong> in your UPI app and submit the UTR below.
+                    </p>
+                  </div>
+                ) : qrDataUrl ? (
                   <img
                     src={qrDataUrl}
                     alt={`UPI Payment QR for ${order.orderNumber}`}
