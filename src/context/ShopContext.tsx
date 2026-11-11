@@ -156,18 +156,40 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     db.saveCart(cart);
   }, [cart]);
 
-  // Sync config updates
+  const refreshConfig = useCallback(async () => {
+    try {
+      const serverConfig = await api.getPublicSettings();
+      if (serverConfig && typeof serverConfig === 'object') {
+        const saved = db.saveBusinessConfig(serverConfig);
+        setConfig(saved);
+        return;
+      }
+    } catch {
+      // fallback to local config
+    }
+    setConfig(db.getBusinessConfig());
+  }, []);
+
+  // Sync config updates from backend MongoDB + local storage events
   useEffect(() => {
+    refreshConfig();
     const handleUpdate = () => {
       setConfig(db.getBusinessConfig());
     };
+    const handleFocusConfig = () => {
+      refreshConfig();
+    };
     window.addEventListener('kvn_store_updated', handleUpdate);
+    window.addEventListener('kvn_settings_updated', handleFocusConfig);
     window.addEventListener('storage', handleUpdate);
+    window.addEventListener('focus', handleFocusConfig);
     return () => {
       window.removeEventListener('kvn_store_updated', handleUpdate);
+      window.removeEventListener('kvn_settings_updated', handleFocusConfig);
       window.removeEventListener('storage', handleUpdate);
+      window.removeEventListener('focus', handleFocusConfig);
     };
-  }, []);
+  }, [refreshConfig]);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -571,10 +593,6 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const isInWishlist = (productId: string) => wishlist.includes(productId);
-
-  const refreshConfig = () => {
-    setConfig(db.getBusinessConfig());
-  };
 
   return (
     <ShopContext.Provider

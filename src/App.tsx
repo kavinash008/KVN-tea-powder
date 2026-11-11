@@ -1,7 +1,9 @@
 import React, { useState, useMemo, useContext, useEffect } from 'react';
 import { useShop, ShopContext, ShopProvider } from './context/ShopContext';
+
 import { db } from './lib/db';
 import { api } from './lib/api';
+
 import { Header } from './components/Header';
 import { Footer } from './components/Footer';
 import { ProductCard } from './components/ProductCard';
@@ -120,8 +122,30 @@ function AppContent() {
   // Handle URL hash changes (Direct access: #admin or ?admin=true)
   useEffect(() => {
     const handleUrlHash = () => {
-      const hash = window.location.hash.toLowerCase();
+      const rawHash = window.location.hash;
+      const hash = rawHash.toLowerCase();
       const search = window.location.search.toLowerCase();
+      if (hash.startsWith('#order=')) {
+        const orderRef = decodeURIComponent(rawHash.slice(7)).trim();
+        if (orderRef) {
+          api.getOrder(orderRef).then((ord) => {
+            setConfirmedOrder(ord);
+            setCurrentPage('confirmation');
+          }).catch(() => {
+            setTrackingOrderId(orderRef);
+            setCurrentPage('tracking');
+          });
+        }
+        return;
+      }
+      if (hash.startsWith('#track=')) {
+        const trackRef = decodeURIComponent(rawHash.slice(7)).trim();
+        if (trackRef) {
+          setTrackingOrderId(trackRef);
+          setCurrentPage('tracking');
+        }
+        return;
+      }
       if (hash === '#admin' || hash === '#/admin' || search.includes('admin=true') || search.includes('page=admin')) {
         setCurrentPage('admin');
       }
@@ -398,6 +422,12 @@ function AppContent() {
             onBack={() => navigateTo('home')}
             onOrderSuccess={(order) => {
               setConfirmedOrder(order);
+              try {
+                localStorage.setItem('kvn_active_order_id', order.orderNumber || order.id);
+              } catch {
+                // ignore
+              }
+              window.location.hash = `order=${encodeURIComponent(order.orderNumber || order.id)}`;
               navigateTo('confirmation');
             }}
           />
@@ -407,9 +437,13 @@ function AppContent() {
         {currentPage === 'confirmation' && confirmedOrder && (
           <OrderConfirmation
             order={confirmedOrder}
-            onContinueShopping={() => navigateTo('home')}
+            onContinueShopping={() => {
+              history.replaceState(null, '', window.location.pathname);
+              navigateTo('home');
+            }}
             onTrackOrder={(orderId) => {
               setTrackingOrderId(orderId);
+              window.location.hash = `track=${encodeURIComponent(orderId)}`;
               navigateTo('tracking');
             }}
           />
@@ -962,6 +996,7 @@ function AppContent() {
         onClose={() => setIsAccountOpen(false)}
         onTrackOrder={(orderId) => {
           setTrackingOrderId(orderId);
+          window.location.hash = `track=${encodeURIComponent(orderId)}`;
           navigateTo('tracking');
         }}
       />

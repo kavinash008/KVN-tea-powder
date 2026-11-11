@@ -1,10 +1,20 @@
 import { MongoClient, Db } from 'mongodb';
 import fs from 'fs';
 import path from 'path';
-import { Order, OrderStatus, CustomerAddress, Product, Category } from '../../src/types';
-import { INITIAL_PRODUCTS, INITIAL_CATEGORIES } from '../../src/data/initialData';
-import { UserDocument, StoreState } from './types';
+import { Order, OrderStatus, CustomerAddress, Product, Category, BusinessConfig, PaymentAuditEntry } from '../../src/types';
+import { INITIAL_PRODUCTS, INITIAL_CATEGORIES, INITIAL_BUSINESS_CONFIG } from '../../src/data/initialData';
+import { UserDocument, StoreState, WhatsAppNotificationRecord } from './types';
 import { WebhookOutboxRecord } from './webhook';
+import { buildUpiPaymentInfo, isValidUpiId, isValidUtr, normalizeUtr } from './upi';
+import { whatsappService } from './whatsapp';
+
+export class HttpError extends Error {
+  statusCode: number;
+  constructor(statusCode: number, message: string) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
 
 let cachedMongoClient: MongoClient | null = null;
 let cachedDb: Db | null = null;
@@ -48,7 +58,11 @@ function ensureLocalFile(): StoreState {
     users: [],
     products: INITIAL_PRODUCTS,
     categories: INITIAL_CATEGORIES,
+    settings: { ...INITIAL_BUSINESS_CONFIG },
+    counters: {},
     webhookEvents: [],
+    whatsappOutbox: [],
+    paymentAuditLogs: [],
     lastUpdated: new Date().toISOString(),
   };
 
@@ -71,6 +85,10 @@ function ensureLocalFile(): StoreState {
     }
     const parsed = JSON.parse(content);
     parsed.webhookEvents = parsed.webhookEvents || [];
+    parsed.whatsappOutbox = parsed.whatsappOutbox || [];
+    parsed.paymentAuditLogs = parsed.paymentAuditLogs || [];
+    parsed.counters = parsed.counters || {};
+    parsed.settings = { ...INITIAL_BUSINESS_CONFIG, ...(parsed.settings || {}) };
     parsed.orders = parsed.orders || [];
     parsed.users = parsed.users || [];
     parsed.products = parsed.products || INITIAL_PRODUCTS;
@@ -140,13 +158,21 @@ async function getMongoDb(): Promise<Db | null> {
       cachedDb.collection('orders').createIndex({ 'customer.phone': 1 }).catch(() => {});
       cachedDb.collection('orders').createIndex({ customerId: 1 }).catch(() => {});
       cachedDb.collection('orders').createIndex({ createdAt: -1 }).catch(() => {});
+      cachedDb.collection('orders').createIndex({ 'paymentDetails.utrNormalized': 1 }).catch(() => {});
+      cachedDb.collection('orders').createIndex({ paymentStatus: 1 }).catch(() => {});
       cachedDb.collection('users').createIndex({ phone: 1 }).catch(() => {});
       cachedDb.collection('users').createIndex({ email: 1 }).catch(() => {});
       cachedDb.collection('users').createIndex({ firebaseUid: 1 }).catch(() => {});
       cachedDb.collection('products').createIndex({ id: 1 }, { unique: true }).catch(() => {});
       cachedDb.collection('categories').createIndex({ id: 1 }, { unique: true }).catch(() => {});
+      cachedDb.collection('settings').createIndex({ id: 1 }, { unique: true }).catch(() => {});
+      cachedDb.collection('counters').createIndex({ id: 1 }, { unique: true }).catch(() => {});
       cachedDb.collection('webhook_outbox').createIndex({ eventId: 1 }, { unique: true }).catch(() => {});
       cachedDb.collection('webhook_outbox').createIndex({ status: 1 }).catch(() => {});
+      cachedDb.collection('whatsapp_notifications').createIndex({ idempotencyKey: 1 }, { unique: true }).catch(() => {});
+      cachedDb.collection('whatsapp_notifications').createIndex({ status: 1 }).catch(() => {});
+      cachedDb.collection('payment_audit_logs').createIndex({ timestamp: -1 }).catch(() => {});
+      cachedDb.collection('payment_audit_logs').createIndex({ orderId: 1 }).catch(() => {});
 
       // Auto-seed products collection if empty
       cachedDb.collection('products').countDocuments().then(async (count) => {
@@ -261,11 +287,153 @@ export const serverDb = {
     return Boolean(recent);
   },
 
-  async createOrder(orderData: Partial<Order> & { customer: any; items: any; totalAmount: number }): Promise<Order> {
+  // ===================== SETTINGS & ORDER SEQUENCES =====================
+
+  async getStoreSettings(): Promise<BusinessConfig> {
+    let stored: Partial<BusinessConfig> | null = null;
+    const db = await getMongoDb();
+    if (db) {
+      const doc = await db.collection('settings').findOne({ id: 'default' });
+      if (doc) {
+        const { _id, id: _docId, ...rest } = doc as any;
+        stored = rest;
+      }
+    } else {
+      const state = ensureLocalFile();
+      stored = state.settings || null;
+    }
+
+    const merged: BusinessConfig = {
+      ...INITIAL_BUSINESS_CONFIG,
+      ...(stored || {}),
+    };
+
+    const envUpi = (process.env.MERCHANT_UPI_ID || '').trim();
+    const envMerchant = (process.env.MERCHANT_UPI_NAME || '').trim();
+    const effectiveUpiId = (merged.upiId || envUpi || '').trim();
+    const effectiveMerchantName = (merged.merchantName || envMerchant || 'KVN Tea Powder').trim() || 'KVN Tea Powder';
+
+    return {
+      ...merged,
+      upiId: effectiveUpiId,
+      merchantName: effectiveMerchantName,
+      upiConfigured: isValidUpiId(effectiveUpiId),
+    };
+  },
+
+  async saveStoreSettings(updates: Partial<BusinessConfig>): Promise<BusinessConfig> {
+    const current = await this.getStoreSettings();
+    const cleanUpi = updates.upiId !== undefined ? updates.upiId.trim() : (current.upiId || '').trim();
+    if (cleanUpi && !isValidUpiId(cleanUpi)) {
+      throw new HttpError(400, 'Please enter a valid UPI ID (for example: kavinash@okicici or 6383050287@ybl).');
+    }
+
+    const nextSettings: BusinessConfig = {
+      ...current,
+      ...updates,
+      upiId: cleanUpi,
+      merchantName: (updates.merchantName ?? current.merchantName ?? 'KVN Tea Powder').trim() || 'KVN Tea Powder',
+      upiConfigured: isValidUpiId(cleanUpi),
+    };
+
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection('settings').updateOne(
+        { id: 'default' },
+        { $set: { id: 'default', ...nextSettings, updatedAt: new Date().toISOString() } },
+        { upsert: true }
+      );
+    }
+
+    const state = ensureLocalFile();
+    state.settings = nextSettings;
+    await saveLocalFile(state);
+    return nextSettings;
+  },
+
+  async getNextOrderNumber(): Promise<string> {
+    const istDate = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, '');
+    const counterId = `ord_seq_${istDate}`;
+    const db = await getMongoDb();
+
+    if (db) {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const res = await db.collection('counters').findOneAndUpdate(
+          { id: counterId },
+          { $inc: { seq: 1 } },
+          { upsert: true, returnDocument: 'after' }
+        );
+        const seqNum = Number((res as any)?.seq || 1);
+        const candidate = `KVN-ORD-${istDate}-${String(seqNum).padStart(3, '0')}`;
+        const clash = await db.collection('orders').findOne({ orderNumber: candidate });
+        if (!clash) return candidate;
+      }
+      return `KVN-ORD-${istDate}-${Math.floor(1000 + Math.random() * 9000)}`;
+    }
+
+    const state = ensureLocalFile();
+    state.counters = state.counters || {};
+    let seq = Number(state.counters[counterId] || 0) + 1;
+    let candidate = `KVN-ORD-${istDate}-${String(seq).padStart(3, '0')}`;
+    while (state.orders.some((o) => o.orderNumber === candidate)) {
+      seq++;
+      candidate = `KVN-ORD-${istDate}-${String(seq).padStart(3, '0')}`;
+    }
+    state.counters[counterId] = seq;
+    await saveLocalFile(state);
+    return candidate;
+  },
+
+  async recordPaymentAudit(entry: PaymentAuditEntry): Promise<void> {
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection('payment_audit_logs').insertOne(entry as any).catch(() => {});
+      return;
+    }
+    const state = ensureLocalFile();
+    state.paymentAuditLogs = state.paymentAuditLogs || [];
+    state.paymentAuditLogs.unshift(entry);
+    if (state.paymentAuditLogs.length > 500) {
+      state.paymentAuditLogs = state.paymentAuditLogs.slice(0, 500);
+    }
+    await saveLocalFile(state);
+  },
+
+  async createOrder(
+    orderData: Partial<Order> & { customer: any; items: any; totalAmount: number; whatsappConsent?: boolean }
+  ): Promise<Order> {
     const now = new Date().toISOString();
     const randomSuffix = Math.floor(100 + Math.random() * 900);
     const orderId = `ord-${Date.now()}-${randomSuffix}`;
-    const orderNumber = `KVN-${Date.now().toString().slice(-6)}-${randomSuffix}`;
+    const orderNumber = await this.getNextOrderNumber();
+    const paymentMethod = orderData.paymentMethod || 'COD';
+    const isUpi = paymentMethod === 'ONLINE_UPI';
+
+    const storeSettings = await this.getStoreSettings();
+    const upiPaymentInfo = isUpi
+      ? buildUpiPaymentInfo({
+          upiId: storeSettings.upiId,
+          merchantName: storeSettings.merchantName || 'KVN Tea Powder',
+          orderNumber,
+          customerName: orderData.customer?.fullName || 'Customer',
+          amount: Number(orderData.totalAmount || 0),
+        })
+      : undefined;
+
+    const initialPaymentStatus = isUpi ? 'PAYMENT_PENDING' : orderData.paymentStatus || 'Pending';
+    const initialOrderStatus: OrderStatus = isUpi ? 'Payment Pending' : orderData.orderStatus || 'Order Confirmed';
+
+    const initialAudit: PaymentAuditEntry = {
+      id: `aud-${Date.now()}-${randomSuffix}`,
+      orderId,
+      orderNumber,
+      action: 'ORDER_CREATED',
+      actor: orderData.customer?.fullName || 'Customer',
+      newPaymentStatus: initialPaymentStatus,
+      amount: Number(orderData.totalAmount || 0),
+      note: isUpi ? 'Order created awaiting UPI payment & UTR verification' : 'COD order created',
+      timestamp: now,
+    };
 
     const newOrder: Order = {
       id: orderId,
@@ -279,17 +447,27 @@ export const serverDb = {
       discountAmount: orderData.discountAmount || 0,
       couponCode: orderData.couponCode,
       totalAmount: orderData.totalAmount,
-      paymentMethod: orderData.paymentMethod || 'COD',
-      paymentStatus: orderData.paymentStatus || 'Pending',
-      orderStatus: orderData.orderStatus || 'Order Confirmed',
+      paymentMethod,
+      paymentStatus: initialPaymentStatus,
+      orderStatus: initialOrderStatus,
       statusHistory: [
         {
-          status: orderData.orderStatus || 'Order Confirmed',
+          status: initialOrderStatus,
           timestamp: now,
-          note: 'Order placed by customer via online store',
+          note: isUpi
+            ? 'Order created. Complete UPI payment and submit your Transaction ID / UTR for verification.'
+            : 'Order placed by customer via online store',
         },
       ],
-      whatsappStatus: orderData.whatsappStatus || 'pending',
+      stockDeducted: !isUpi,
+      stockDeductedAt: !isUpi ? now : undefined,
+      whatsappConsent: orderData.whatsappConsent !== false,
+      whatsappStatus: isUpi
+        ? 'Pending'
+        : orderData.whatsappStatus || (whatsappService.isConfigured() ? 'Pending' : 'not_configured'),
+      upiPaymentInfo,
+      paymentDetails: {},
+      paymentAuditLog: [initialAudit],
       excelSyncStatus: orderData.excelSyncStatus || 'pending',
       notes: orderData.notes || '',
       createdAt: now,
@@ -298,28 +476,628 @@ export const serverDb = {
 
     let db = await getMongoDb();
     if (!db && MONGODB_URI) {
-      // Retry once to ensure persistence to shared cloud database
       mongoFailedUntil = 0;
       db = await getMongoDb();
     }
 
     if (db) {
       await db.collection('orders').insertOne(newOrder as any);
-      await this.decrementProductStock(orderData.items).catch((e) => console.warn('Stock decrement warning:', e));
+      if (!isUpi) {
+        await this.decrementProductStock(orderData.items).catch((e) => console.warn('Stock decrement warning:', e));
+      }
+      await this.recordPaymentAudit(initialAudit);
       return newOrder;
     }
 
     const state = ensureLocalFile();
     state.orders.unshift(newOrder);
     await saveLocalFile(state);
-    await this.decrementProductStock(orderData.items).catch((e) => console.warn('Stock decrement warning:', e));
+    if (!isUpi) {
+      await this.decrementProductStock(orderData.items).catch((e) => console.warn('Stock decrement warning:', e));
+    }
+    await this.recordPaymentAudit(initialAudit);
     return newOrder;
+  },
+
+  async submitOrderPaymentProof(
+    orderIdOrNumber: string,
+    proof: { utr: string; submittedPayerName?: string; paymentScreenshotUrl?: string }
+  ): Promise<Order> {
+    const existing = await this.getOrderById(orderIdOrNumber);
+    if (!existing) {
+      throw new HttpError(404, 'Order not found');
+    }
+    if (existing.paymentStatus === 'PAID' || existing.paymentStatus === 'Paid') {
+      throw new HttpError(409, 'Payment for this order has already been verified.');
+    }
+    if (!proof.utr || !isValidUtr(proof.utr)) {
+      throw new HttpError(400, 'Please enter a valid UPI Transaction ID / UTR (6 to 40 letters or digits).');
+    }
+
+    const utrTrimmed = proof.utr.trim();
+    const utrNormalized = normalizeUtr(utrTrimmed);
+    const cleanPayerName = (proof.submittedPayerName || '').trim().slice(0, 80);
+    const cleanScreenshot = (proof.paymentScreenshotUrl || '').trim();
+
+    if (cleanScreenshot.startsWith('data:image/') && cleanScreenshot.length > 200000) {
+      throw new HttpError(413, 'Screenshot image is too large (>150KB). Please choose a smaller image.');
+    }
+
+    const now = new Date().toISOString();
+    const auditEntry: PaymentAuditEntry = {
+      id: `aud-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      orderId: existing.id,
+      orderNumber: existing.orderNumber,
+      action: 'UTR_SUBMITTED',
+      actor: cleanPayerName || existing.customer.fullName,
+      previousPaymentStatus: existing.paymentStatus,
+      newPaymentStatus: 'PAYMENT_PENDING',
+      utr: utrNormalized,
+      amount: existing.totalAmount,
+      note: cleanPayerName ? `UTR submitted by payer: ${cleanPayerName}` : 'Customer submitted UTR for verification',
+      timestamp: now,
+    };
+
+    const nextDetails = {
+      ...(existing.paymentDetails || {}),
+      utr: utrTrimmed,
+      utrNormalized,
+      submittedPayerName: cleanPayerName || existing.paymentDetails?.submittedPayerName,
+      paymentScreenshotUrl: cleanScreenshot || existing.paymentDetails?.paymentScreenshotUrl,
+      paymentSubmittedAt: now,
+      rejectionReason: undefined,
+      rejectedAt: undefined,
+      rejectedBy: undefined,
+    };
+
+    const db = await getMongoDb();
+    if (db) {
+      const duplicate = await db.collection('orders').findOne({
+        id: { $ne: existing.id },
+        'paymentDetails.utrNormalized': utrNormalized,
+        paymentStatus: { $in: ['PAYMENT_PENDING', 'Pending', 'PAID', 'Paid'] },
+      });
+      if (duplicate) {
+        throw new HttpError(409, `UPI Transaction ID / UTR "${utrNormalized}" has already been submitted on another order.`);
+      }
+
+      await db.collection('orders').updateOne(
+        { id: existing.id },
+        {
+          $set: {
+            paymentStatus: 'PAYMENT_PENDING',
+            orderStatus: 'Payment Pending',
+            paymentDetails: nextDetails,
+            updatedAt: now,
+          },
+          $push: {
+            statusHistory: {
+              status: 'Payment Pending',
+              timestamp: now,
+              note: `UTR ${utrNormalized} submitted. Awaiting bank verification.`,
+            },
+            paymentAuditLog: auditEntry,
+          } as any,
+        }
+      );
+      await this.recordPaymentAudit(auditEntry);
+      return (await this.getOrderById(existing.id)) as Order;
+    }
+
+    const state = ensureLocalFile();
+    const duplicate = state.orders.find(
+      (o) =>
+        o.id !== existing.id &&
+        o.paymentDetails?.utrNormalized === utrNormalized &&
+        ['PAYMENT_PENDING', 'Pending', 'PAID', 'Paid'].includes(o.paymentStatus)
+    );
+    if (duplicate) {
+      throw new HttpError(409, `UPI Transaction ID / UTR "${utrNormalized}" has already been submitted on another order.`);
+    }
+
+    const idx = state.orders.findIndex((o) => o.id === existing.id);
+    if (idx === -1) throw new HttpError(404, 'Order not found');
+
+    state.orders[idx] = {
+      ...state.orders[idx],
+      paymentStatus: 'PAYMENT_PENDING',
+      orderStatus: 'Payment Pending',
+      paymentDetails: nextDetails,
+      updatedAt: now,
+      statusHistory: [
+        ...state.orders[idx].statusHistory,
+        {
+          status: 'Payment Pending',
+          timestamp: now,
+          note: `UTR ${utrNormalized} submitted. Awaiting bank verification.`,
+        },
+      ],
+      paymentAuditLog: [...(state.orders[idx].paymentAuditLog || []), auditEntry],
+    };
+    await saveLocalFile(state);
+    await this.recordPaymentAudit(auditEntry);
+    return state.orders[idx];
+  },
+
+  async verifyStockAvailableForItems(items: any[]): Promise<void> {
+    if (!items || items.length === 0) return;
+    const products = await this.getAllProducts(false);
+    for (const item of items) {
+      const prod = products.find((p) => p.id === item.productId);
+      if (!prod) {
+        throw new HttpError(409, `Product "${item.productName}" is no longer available in inventory.`);
+      }
+      const variant = prod.variants?.find((v) => v.id === item.variantId || v.weight === item.weight) || prod.variants?.[0];
+      const needed = Math.max(1, Number(item.quantity) || 1);
+      const available = Number(variant?.stock || 0);
+      if (!variant || available < needed) {
+        throw new HttpError(
+          409,
+          `Insufficient stock for "${prod.name} (${item.weight})": requested ${needed}, only ${available} remaining.`
+        );
+      }
+    }
+  },
+
+  async approveOrderPayment(
+    orderIdOrNumber: string,
+    params: {
+      verifiedAmount?: number;
+      verifiedPayerName?: string;
+      utrOverride?: string;
+      adminIdentity?: string;
+      adminNote?: string;
+    }
+  ): Promise<Order> {
+    const existing = await this.getOrderById(orderIdOrNumber);
+    if (!existing) {
+      throw new HttpError(404, 'Order not found');
+    }
+    if (existing.paymentStatus !== 'PAYMENT_PENDING' && existing.paymentStatus !== 'Pending') {
+      throw new HttpError(409, `Cannot approve: Order payment status is already "${existing.paymentStatus}".`);
+    }
+
+    const rawUtr = (params.utrOverride || existing.paymentDetails?.utr || '').trim();
+    const isUpi = existing.paymentMethod === 'ONLINE_UPI';
+    if (isUpi && !isValidUtr(rawUtr)) {
+      throw new HttpError(400, 'Cannot approve UPI payment without a valid UPI Transaction ID / UTR.');
+    }
+
+    const utrNormalized = rawUtr ? normalizeUtr(rawUtr) : undefined;
+    const expectedAmount = Number(existing.totalAmount || 0);
+    const verifiedAmount = params.verifiedAmount !== undefined ? Number(params.verifiedAmount) : expectedAmount;
+    if (Math.abs(verifiedAmount - expectedAmount) > 0.01) {
+      throw new HttpError(
+        400,
+        `Verified amount ₹${verifiedAmount} does not match authoritative order total ₹${expectedAmount}.`
+      );
+    }
+
+    if (!existing.stockDeducted) {
+      await this.verifyStockAvailableForItems(existing.items);
+    }
+
+    const now = new Date().toISOString();
+    const adminIdentity = (params.adminIdentity || 'Kavinash (Admin)').trim();
+    const verifiedPayerName =
+      (params.verifiedPayerName || existing.paymentDetails?.submittedPayerName || '').trim() || undefined;
+
+    const auditEntry: PaymentAuditEntry = {
+      id: `aud-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      orderId: existing.id,
+      orderNumber: existing.orderNumber,
+      action: 'PAYMENT_APPROVED',
+      actor: adminIdentity,
+      previousPaymentStatus: existing.paymentStatus,
+      newPaymentStatus: 'PAID',
+      utr: utrNormalized,
+      amount: verifiedAmount,
+      note:
+        params.adminNote?.trim() ||
+        `Payment ₹${verifiedAmount} manually verified by ${adminIdentity}${verifiedPayerName ? ` (Payer: ${verifiedPayerName})` : ''}`,
+      timestamp: now,
+    };
+
+    const nextDetails = {
+      ...(existing.paymentDetails || {}),
+      utr: rawUtr || existing.paymentDetails?.utr,
+      utrNormalized: utrNormalized || existing.paymentDetails?.utrNormalized,
+      verifiedAmount,
+      verifiedPayerName,
+      verifiedAt: now,
+      verifiedBy: adminIdentity,
+      rejectionReason: undefined,
+      rejectedAt: undefined,
+      rejectedBy: undefined,
+    };
+
+    const db = await getMongoDb();
+    if (db) {
+      if (utrNormalized) {
+        const duplicatePaid = await db.collection('orders').findOne({
+          id: { $ne: existing.id },
+          'paymentDetails.utrNormalized': utrNormalized,
+          paymentStatus: { $in: ['PAID', 'Paid'] },
+        });
+        if (duplicatePaid) {
+          throw new HttpError(
+            409,
+            `Duplicate UTR blocked: "${utrNormalized}" has already been verified on order ${duplicatePaid.orderNumber}.`
+          );
+        }
+      }
+
+      const atomicRes = await db.collection('orders').findOneAndUpdate(
+        {
+          id: existing.id,
+          paymentStatus: { $in: ['PAYMENT_PENDING', 'Pending'] },
+        },
+        {
+          $set: {
+            paymentStatus: 'PAID',
+            orderStatus: 'Order Confirmed',
+            stockDeducted: true,
+            stockDeductedAt: existing.stockDeductedAt || now,
+            paymentDetails: nextDetails,
+            updatedAt: now,
+          },
+          $push: {
+            statusHistory: {
+              $each: [
+                {
+                  status: 'Payment Confirmed',
+                  timestamp: now,
+                  note: `Payment ₹${verifiedAmount} verified by ${adminIdentity}${utrNormalized ? ` (UTR: ${utrNormalized})` : ''}`,
+                },
+                {
+                  status: 'Order Confirmed',
+                  timestamp: now,
+                  note: 'Order confirmed after payment verification',
+                },
+              ],
+            },
+            paymentAuditLog: auditEntry,
+          } as any,
+        },
+        { returnDocument: 'after' }
+      );
+
+      if (!atomicRes) {
+        throw new HttpError(409, 'Order payment was already verified or modified concurrently.');
+      }
+
+      if (!existing.stockDeducted) {
+        await this.decrementProductStock(existing.items);
+      }
+
+      await this.recordPaymentAudit(auditEntry);
+      const { _id, ...cleanOrder } = atomicRes as any;
+      return cleanOrder as Order;
+    }
+
+    const state = ensureLocalFile();
+    if (utrNormalized) {
+      const duplicatePaid = state.orders.find(
+        (o) =>
+          o.id !== existing.id &&
+          o.paymentDetails?.utrNormalized === utrNormalized &&
+          ['PAID', 'Paid'].includes(o.paymentStatus)
+      );
+      if (duplicatePaid) {
+        throw new HttpError(
+          409,
+          `Duplicate UTR blocked: "${utrNormalized}" has already been verified on order ${duplicatePaid.orderNumber}.`
+        );
+      }
+    }
+
+    const idx = state.orders.findIndex(
+      (o) => o.id === existing.id && ['PAYMENT_PENDING', 'Pending'].includes(o.paymentStatus)
+    );
+    if (idx === -1) {
+      throw new HttpError(409, 'Order payment was already verified or modified.');
+    }
+
+    const shouldDeduct = !state.orders[idx].stockDeducted;
+    state.orders[idx] = {
+      ...state.orders[idx],
+      paymentStatus: 'PAID',
+      orderStatus: 'Order Confirmed',
+      stockDeducted: true,
+      stockDeductedAt: state.orders[idx].stockDeductedAt || now,
+      paymentDetails: nextDetails,
+      updatedAt: now,
+      statusHistory: [
+        ...state.orders[idx].statusHistory,
+        {
+          status: 'Payment Confirmed',
+          timestamp: now,
+          note: `Payment ₹${verifiedAmount} verified by ${adminIdentity}${utrNormalized ? ` (UTR: ${utrNormalized})` : ''}`,
+        },
+        {
+          status: 'Order Confirmed',
+          timestamp: now,
+          note: 'Order confirmed after payment verification',
+        },
+      ],
+      paymentAuditLog: [...(state.orders[idx].paymentAuditLog || []), auditEntry],
+    };
+    await saveLocalFile(state);
+
+    if (shouldDeduct) {
+      await this.decrementProductStock(state.orders[idx].items);
+    }
+    await this.recordPaymentAudit(auditEntry);
+    return state.orders[idx];
+  },
+
+  async rejectOrderPayment(
+    orderIdOrNumber: string,
+    params: { reason: string; adminIdentity?: string }
+  ): Promise<Order> {
+    const existing = await this.getOrderById(orderIdOrNumber);
+    if (!existing) {
+      throw new HttpError(404, 'Order not found');
+    }
+    if (existing.paymentStatus !== 'PAYMENT_PENDING' && existing.paymentStatus !== 'Pending') {
+      throw new HttpError(409, `Cannot reject: Order payment status is already "${existing.paymentStatus}".`);
+    }
+
+    const reason = (params.reason || 'Transaction could not be verified in bank statement').trim();
+    const adminIdentity = (params.adminIdentity || 'Kavinash (Admin)').trim();
+    const now = new Date().toISOString();
+
+    const auditEntry: PaymentAuditEntry = {
+      id: `aud-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      orderId: existing.id,
+      orderNumber: existing.orderNumber,
+      action: 'PAYMENT_REJECTED',
+      actor: adminIdentity,
+      previousPaymentStatus: existing.paymentStatus,
+      newPaymentStatus: 'REJECTED',
+      utr: existing.paymentDetails?.utrNormalized,
+      amount: existing.totalAmount,
+      note: reason,
+      timestamp: now,
+    };
+
+    const nextDetails = {
+      ...(existing.paymentDetails || {}),
+      rejectedAt: now,
+      rejectedBy: adminIdentity,
+      rejectionReason: reason,
+    };
+
+    const db = await getMongoDb();
+    if (db) {
+      const res = await db.collection('orders').findOneAndUpdate(
+        { id: existing.id, paymentStatus: { $in: ['PAYMENT_PENDING', 'Pending'] } },
+        {
+          $set: {
+            paymentStatus: 'REJECTED',
+            orderStatus: 'Cancelled',
+            paymentDetails: nextDetails,
+            updatedAt: now,
+          },
+          $push: {
+            statusHistory: {
+              status: 'Cancelled',
+              timestamp: now,
+              note: `Payment rejected by ${adminIdentity}: ${reason}`,
+            },
+            paymentAuditLog: auditEntry,
+          } as any,
+        },
+        { returnDocument: 'after' }
+      );
+      if (!res) {
+        throw new HttpError(409, 'Order payment status was already modified.');
+      }
+      await this.recordPaymentAudit(auditEntry);
+      const { _id, ...cleanOrder } = res as any;
+      return cleanOrder as Order;
+    }
+
+    const state = ensureLocalFile();
+    const idx = state.orders.findIndex(
+      (o) => o.id === existing.id && ['PAYMENT_PENDING', 'Pending'].includes(o.paymentStatus)
+    );
+    if (idx === -1) {
+      throw new HttpError(409, 'Order payment status was already modified.');
+    }
+    state.orders[idx] = {
+      ...state.orders[idx],
+      paymentStatus: 'REJECTED',
+      orderStatus: 'Cancelled',
+      paymentDetails: nextDetails,
+      updatedAt: now,
+      statusHistory: [
+        ...state.orders[idx].statusHistory,
+        {
+          status: 'Cancelled',
+          timestamp: now,
+          note: `Payment rejected by ${adminIdentity}: ${reason}`,
+        },
+      ],
+      paymentAuditLog: [...(state.orders[idx].paymentAuditLog || []), auditEntry],
+    };
+    await saveLocalFile(state);
+    await this.recordPaymentAudit(auditEntry);
+    return state.orders[idx];
+  },
+
+  async dispatchIdempotentPaymentWhatsApp(
+    orderIdOrNumber: string,
+    forceRetry: boolean = false
+  ): Promise<{
+    alreadySent: boolean;
+    outbox: WhatsAppNotificationRecord;
+    order: Order;
+  }> {
+    const order = await this.getOrderById(orderIdOrNumber);
+    if (!order) {
+      throw new HttpError(404, 'Order not found');
+    }
+    const isPaymentApproved = order.paymentStatus === 'PAID' || order.paymentStatus === 'Paid';
+    const isCodConfirmed = order.paymentMethod === 'COD' && order.orderStatus !== 'Cancelled';
+    if (!isPaymentApproved && !isCodConfirmed) {
+      throw new HttpError(409, 'WhatsApp confirmation can only be sent after payment verification or COD confirmation.');
+    }
+
+    const idempotencyKey = `wa_payment_verified_${order.id}`;
+    const now = new Date().toISOString();
+    const payloadData = whatsappService.buildPaymentConfirmationPayload(order);
+    const recipientPhone = whatsappService.normalizePhone(
+      order.customer.fullPhone || order.customer.phone,
+      order.customer.countryCode
+    );
+
+    const db = await getMongoDb();
+
+    // Check existing outbox record for strict idempotency
+    let existingOutbox: WhatsAppNotificationRecord | null = null;
+    if (db) {
+      const doc = await db.collection('whatsapp_notifications').findOne({ idempotencyKey });
+      if (doc) {
+        const { _id, ...rest } = doc as any;
+        existingOutbox = rest as WhatsAppNotificationRecord;
+      }
+    } else {
+      const state = ensureLocalFile();
+      existingOutbox = (state.whatsappOutbox || []).find((w) => w.idempotencyKey === idempotencyKey) || null;
+    }
+
+    if (existingOutbox && existingOutbox.status === 'Sent') {
+      return { alreadySent: true, outbox: existingOutbox, order };
+    }
+    if (existingOutbox && !forceRetry && existingOutbox.attempts >= existingOutbox.maxAttempts) {
+      return { alreadySent: false, outbox: existingOutbox, order };
+    }
+
+    const baseOutbox: WhatsAppNotificationRecord = existingOutbox || {
+      id: `wa-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      idempotencyKey,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      recipientPhone,
+      customerName: order.customer.fullName,
+      templateName: (process.env.WHATSAPP_TEMPLATE_NAME || '').trim() || undefined,
+      messagePreview: payloadData.messageText,
+      status: 'Pending',
+      attempts: 0,
+      maxAttempts: 5,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    if (order.whatsappConsent === false && !forceRetry) {
+      const optOutRecord: WhatsAppNotificationRecord = {
+        ...baseOutbox,
+        status: 'Pending',
+        reason: 'Customer did not opt in to WhatsApp updates at checkout',
+        updatedAt: now,
+      };
+      if (db) {
+        await db.collection('whatsapp_notifications').updateOne(
+          { idempotencyKey },
+          { $set: optOutRecord },
+          { upsert: true }
+        );
+      } else {
+        const state = ensureLocalFile();
+        state.whatsappOutbox = (state.whatsappOutbox || []).filter((w) => w.idempotencyKey !== idempotencyKey);
+        state.whatsappOutbox.unshift(optOutRecord);
+        await saveLocalFile(state);
+      }
+      const updated = (await this.updateOrderSyncStatuses(order.id, {
+        whatsappStatus: 'opted_out',
+        whatsappError: optOutRecord.reason,
+      })) as Order;
+      return { alreadySent: false, outbox: optOutRecord, order: updated };
+    }
+
+    const result = await whatsappService.sendPaymentVerifiedNotification(order);
+    const completedAt = new Date().toISOString();
+    const updatedOutbox: WhatsAppNotificationRecord = {
+      ...baseOutbox,
+      status: result.status,
+      reason: result.success ? undefined : result.error || result.reason,
+      attempts: baseOutbox.attempts + Math.max(1, result.attempts || 1),
+      whatsappMessageId: result.messageId || baseOutbox.whatsappMessageId,
+      lastAttemptAt: completedAt,
+      sentAt: result.sentAt || baseOutbox.sentAt,
+      messagePreview: result.messagePreview,
+      updatedAt: completedAt,
+    };
+
+    if (db) {
+      await db.collection('whatsapp_notifications').updateOne(
+        { idempotencyKey },
+        { $set: updatedOutbox },
+        { upsert: true }
+      );
+    } else {
+      const state = ensureLocalFile();
+      state.whatsappOutbox = (state.whatsappOutbox || []).filter((w) => w.idempotencyKey !== idempotencyKey);
+      state.whatsappOutbox.unshift(updatedOutbox);
+      await saveLocalFile(state);
+    }
+
+    const updatedOrder = (await this.updateOrderSyncStatuses(order.id, {
+      whatsappStatus: result.status,
+      whatsappMessageId: result.messageId,
+      whatsappSentAt: result.sentAt,
+      whatsappError: result.success ? undefined : result.error,
+    })) as Order;
+
+    await this.recordPaymentAudit({
+      id: `aud-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      action: result.success ? 'WHATSAPP_SENT' : 'WHATSAPP_FAILED',
+      actor: 'WhatsApp Cloud API Service',
+      note: result.success
+        ? `Confirmation sent to +${recipientPhone} (Message ID: ${result.messageId || 'accepted'})`
+        : result.error || 'Notification queued as Pending/Failed',
+      timestamp: completedAt,
+    });
+
+    return { alreadySent: false, outbox: updatedOutbox, order: updatedOrder };
+  },
+
+  async getWhatsAppOutboxAll(): Promise<WhatsAppNotificationRecord[]> {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection('whatsapp_notifications').find({}).sort({ updatedAt: -1 }).limit(100).toArray();
+      return docs.map((d: any) => {
+        const { _id, ...rest } = d;
+        return rest as WhatsAppNotificationRecord;
+      });
+    }
+    const state = ensureLocalFile();
+    return [...(state.whatsappOutbox || [])].sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    );
+  },
+
+  async getPaymentAuditLogs(limit: number = 100): Promise<PaymentAuditEntry[]> {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection('payment_audit_logs').find({}).sort({ timestamp: -1 }).limit(limit).toArray();
+      return docs.map((d: any) => {
+        const { _id, ...rest } = d;
+        return rest as PaymentAuditEntry;
+      });
+    }
+    const state = ensureLocalFile();
+    return (state.paymentAuditLogs || []).slice(0, limit);
   },
 
   async updateOrderSyncStatuses(
     orderId: string,
     updates: {
-      whatsappStatus?: 'pending' | 'sent' | 'failed' | 'not_configured';
+      whatsappStatus?: 'Pending' | 'Sent' | 'Failed' | 'pending' | 'sent' | 'failed' | 'not_configured' | 'opted_out';
+      whatsappMessageId?: string;
       whatsappSentAt?: string;
       whatsappError?: string;
       excelSyncStatus?: 'pending' | 'synced' | 'failed' | 'not_configured';

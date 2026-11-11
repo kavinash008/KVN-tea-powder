@@ -10,6 +10,9 @@ export const INITIAL_BUSINESS_CONFIG: BusinessConfig = {
   freeDeliveryThreshold: 500,
   fssaiNumber: '',
   gstNumber: '',
+  upiId: '',
+  merchantName: 'KVN Tea Powder',
+  upiConfigured: false,
 };
 
 export const INITIAL_CATEGORIES: Category[] = [

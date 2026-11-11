@@ -1,16 +1,54 @@
 import { CartItem, OrderCustomer, Product } from '../../src/types';
 import { INITIAL_PRODUCTS, INITIAL_BUSINESS_CONFIG } from '../../src/data/initialData';
 
-export function validatePhone(phone: string): { valid: boolean; normalized: string; error?: string } {
+export function validatePhone(
+  phone: string,
+  countryCode: string = '+91'
+): { valid: boolean; normalized: string; fullPhone: string; countryCode: string; error?: string } {
   if (!phone) {
-    return { valid: false, normalized: '', error: 'Mobile number is required' };
+    return { valid: false, normalized: '', fullPhone: '', countryCode: '+91', error: 'Mobile number is required' };
   }
+  const trimmed = phone.trim();
+  let effectiveCode = (countryCode || '+91').trim();
+  if (trimmed.startsWith('+') && !countryCode) {
+    const match = trimmed.match(/^(\+\d{1,4})/);
+    if (match) effectiveCode = match[1];
+  }
+  if (!effectiveCode.startsWith('+')) {
+    effectiveCode = `+${effectiveCode.replace(/\D/g, '') || '91'}`;
+  }
+
   const digits = phone.replace(/\D/g, '');
-  const normalized = digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : digits;
-  if (!/^[6-9]\d{9}$/.test(normalized)) {
-    return { valid: false, normalized, error: 'Please enter a valid 10-digit Indian mobile number' };
+  const codeDigits = effectiveCode.replace(/\D/g, '') || '91';
+
+  if (codeDigits === '91') {
+    const normalized = digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : digits;
+    if (!/^[6-9]\d{9}$/.test(normalized)) {
+      return {
+        valid: false,
+        normalized,
+        fullPhone: '',
+        countryCode: '+91',
+        error: 'Please enter a valid 10-digit Indian mobile number',
+      };
+    }
+    return { valid: true, normalized, fullPhone: `+91${normalized}`, countryCode: '+91' };
   }
-  return { valid: true, normalized };
+
+  const normalized =
+    digits.startsWith(codeDigits) && digits.length > codeDigits.length + 5
+      ? digits.slice(codeDigits.length)
+      : digits;
+  if (!/^\d{6,14}$/.test(normalized)) {
+    return {
+      valid: false,
+      normalized,
+      fullPhone: '',
+      countryCode: effectiveCode,
+      error: 'Please enter a valid mobile number with country code',
+    };
+  }
+  return { valid: true, normalized, fullPhone: `+${codeDigits}${normalized}`, countryCode: effectiveCode };
 }
 
 export function validatePincode(pincode: string): { valid: boolean; error?: string } {
@@ -24,7 +62,7 @@ export function validateAddress(customer: Partial<OrderCustomer>): { valid: bool
   if (!customer.fullName || customer.fullName.trim().length < 2) {
     return { valid: false, error: 'Full name is required (minimum 2 characters)' };
   }
-  const phoneVal = validatePhone(customer.phone || '');
+  const phoneVal = validatePhone(customer.phone || '', customer.countryCode || '+91');
   if (!phoneVal.valid) {
     return { valid: false, error: phoneVal.error };
   }

@@ -1,4 +1,4 @@
-import { Order, OrderCustomer, CartItem, CustomerAddress, CustomerUser, OrderStatus, Product, Category } from '../types';
+import { Order, OrderCustomer, CartItem, CustomerAddress, CustomerUser, OrderStatus, Product, Category, BusinessConfig, PaymentAuditEntry } from '../types';
 
 const API_BASE = '/api';
 
@@ -157,13 +157,20 @@ export const api = {
     return true;
   },
 
-  // 3. Orders
+  // 3. Orders & UPI Payments
+  async getPublicSettings(): Promise<BusinessConfig> {
+    const json = await safeRequest<{ settings: BusinessConfig }>(`${API_BASE}/settings/public?_t=${Date.now()}`);
+    return json.settings;
+  },
+
   async createOrder(
     orderData: {
       customer: OrderCustomer;
       items: CartItem[];
       paymentMethod: 'COD' | 'Online' | 'ONLINE_UPI';
+      whatsappConsent?: boolean;
       notes?: string;
+      addressId?: string;
     },
     token?: string | null
   ): Promise<Order> {
@@ -175,8 +182,37 @@ export const api = {
     return json.order;
   },
 
+  async submitOrderPayment(
+    orderId: string,
+    payload: { utr: string; submittedPayerName?: string; paymentScreenshotUrl?: string }
+  ): Promise<{ success: boolean; message: string; order: Order }> {
+    return safeRequest<{ success: boolean; message: string; order: Order }>(
+      `${API_BASE}/orders/${encodeURIComponent(orderId)}/submit-payment`,
+      {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  async getPaymentCloudinarySignature(): Promise<{
+    configured: boolean;
+    cloudName?: string;
+    apiKey?: string;
+    timestamp?: number;
+    folder?: string;
+    signature?: string;
+    message?: string;
+  }> {
+    return safeRequest(`${API_BASE}/payments/cloudinary-sign`, {
+      method: 'GET',
+      headers: getHeaders(),
+    });
+  },
+
   async getOrder(id: string): Promise<Order> {
-    const json = await safeRequest<{ order: Order }>(`${API_BASE}/orders/${encodeURIComponent(id)}`);
+    const json = await safeRequest<{ order: Order }>(`${API_BASE}/orders/${encodeURIComponent(id)}?_t=${Date.now()}`);
     return json.order;
   },
 
@@ -311,6 +347,78 @@ export const api = {
     return safeRequest<any>(`${API_BASE}/admin/whatsapp/retry/${encodeURIComponent(orderId)}`, {
       method: 'POST',
       headers: getAdminHeaders(token),
+    });
+  },
+
+  async adminRetryAllWhatsApp(token?: string): Promise<any> {
+    return safeRequest<any>(`${API_BASE}/admin/whatsapp/retry-pending`, {
+      method: 'POST',
+      headers: getAdminHeaders(token),
+    });
+  },
+
+  // 6b. Admin Settings & Payments Verification
+  async adminGetSettings(token?: string): Promise<BusinessConfig> {
+    const json = await safeRequest<{ settings: BusinessConfig }>(`${API_BASE}/admin/settings?_t=${Date.now()}`, {
+      headers: getAdminHeaders(token),
+    });
+    return json.settings;
+  },
+
+  async adminUpdateSettings(token: string | undefined, settings: Partial<BusinessConfig>): Promise<BusinessConfig> {
+    const json = await safeRequest<{ settings: BusinessConfig }>(`${API_BASE}/admin/settings`, {
+      method: 'PUT',
+      headers: getAdminHeaders(token),
+      body: JSON.stringify(settings),
+    });
+    return json.settings;
+  },
+
+  async adminGetPayments(token?: string): Promise<{
+    orders: Order[];
+    outbox: any[];
+    auditLogs: PaymentAuditEntry[];
+    summary: {
+      totalVerifiedPayments: number;
+      totalVerifiedAmount: number;
+      pendingPayments: number;
+      rejectedPayments: number;
+      whatsappSent: number;
+      whatsappFailed: number;
+      whatsappPending: number;
+    };
+  }> {
+    return safeRequest(`${API_BASE}/admin/payments?_t=${Date.now()}`, {
+      headers: getAdminHeaders(token),
+    });
+  },
+
+  async adminApprovePayment(
+    token: string | undefined,
+    orderId: string,
+    payload: {
+      verifiedAmount?: number;
+      verifiedPayerName?: string;
+      utrOverride?: string;
+      adminNote?: string;
+    }
+  ): Promise<{ success: boolean; message: string; order: Order; whatsapp?: any }> {
+    return safeRequest(`${API_BASE}/admin/payments/${encodeURIComponent(orderId)}/approve`, {
+      method: 'POST',
+      headers: getAdminHeaders(token),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async adminRejectPayment(
+    token: string | undefined,
+    orderId: string,
+    reason: string
+  ): Promise<{ success: boolean; message: string; order: Order }> {
+    return safeRequest(`${API_BASE}/admin/payments/${encodeURIComponent(orderId)}/reject`, {
+      method: 'POST',
+      headers: getAdminHeaders(token),
+      body: JSON.stringify({ reason }),
     });
   },
 

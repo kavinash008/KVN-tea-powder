@@ -17,7 +17,10 @@ var INITIAL_BUSINESS_CONFIG = {
   defaultDeliveryCharge: 30,
   freeDeliveryThreshold: 500,
   fssaiNumber: "",
-  gstNumber: ""
+  gstNumber: "",
+  upiId: "",
+  merchantName: "KVN Tea Powder",
+  upiConfigured: false
 };
 var INITIAL_CATEGORIES = [
   { id: "cat-1", name: "Premium Tea Powder", slug: "premium-tea", mainCategory: "tea", description: "Selected high-elevation CTC leaves for brisk, rich liquor and deep aroma." },
@@ -216,7 +219,279 @@ var INITIAL_PRODUCTS = [
   }
 ];
 
+// server/_lib/upi.ts
+function isValidUpiId(upiId) {
+  if (!upiId || typeof upiId !== "string") return false;
+  const trimmed = upiId.trim();
+  return /^[a-zA-Z0-9.\-_]{2,}@[a-zA-Z0-9.\-_]{2,}$/.test(trimmed);
+}
+function normalizeUtr(utr) {
+  return (utr || "").trim().replace(/\s+/g, "").toUpperCase();
+}
+function isValidUtr(utr) {
+  const normalized = normalizeUtr(utr);
+  return /^[A-Z0-9\-_]{6,40}$/.test(normalized);
+}
+function buildUpiPaymentInfo(params) {
+  const cleanUpiId = (params.upiId || "").trim();
+  const merchantName = (params.merchantName || "KVN Tea Powder").trim() || "KVN Tea Powder";
+  const amount = Number(params.amount || 0);
+  const orderParts = params.orderNumber.split("-");
+  const shortSeq = orderParts[orderParts.length - 1] || params.orderNumber;
+  const cleanCustomerName = (params.customerName || "CUSTOMER").replace(/[^a-zA-Z0-9 ]+/g, " ").trim().replace(/\s+/g, " ").toUpperCase().slice(0, 24);
+  const transactionRef = params.orderNumber.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  const transactionNote = `KVN ORDER ${shortSeq} - CUSTOMER ${cleanCustomerName}`.slice(0, 50);
+  if (!isValidUpiId(cleanUpiId)) {
+    return {
+      configured: false,
+      merchantName,
+      transactionRef,
+      transactionNote,
+      amount,
+      currency: "INR",
+      warning: "Merchant UPI ID is not configured in Admin Settings. Please configure a valid UPI ID before accepting UPI QR payments."
+    };
+  }
+  const queryParams = [
+    `pa=${encodeURIComponent(cleanUpiId)}`,
+    `pn=${encodeURIComponent(merchantName)}`,
+    `tr=${encodeURIComponent(transactionRef)}`,
+    `tn=${encodeURIComponent(transactionNote)}`,
+    `am=${amount.toFixed(2)}`,
+    `cu=INR`
+  ];
+  return {
+    configured: true,
+    upiId: cleanUpiId,
+    merchantName,
+    transactionRef,
+    transactionNote,
+    amount,
+    currency: "INR",
+    upiUri: `upi://pay?${queryParams.join("&")}`
+  };
+}
+
+// server/_lib/whatsapp.ts
+var WhatsAppService = class {
+  getEnvConfig() {
+    const phoneNumberId = (process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
+    const accessToken = (process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
+    const businessAccountId = (process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "").trim();
+    const templateName = (process.env.WHATSAPP_TEMPLATE_NAME || "").trim();
+    const apiVersion = (process.env.WHATSAPP_API_VERSION || "v21.0").trim() || "v21.0";
+    return {
+      phoneNumberId,
+      accessToken,
+      businessAccountId,
+      templateName,
+      apiVersion
+    };
+  }
+  isConfigured() {
+    const cfg = this.getEnvConfig();
+    return Boolean(cfg.phoneNumberId && cfg.accessToken);
+  }
+  getConfigDiagnostics() {
+    const cfg = this.getEnvConfig();
+    const masked = cfg.phoneNumberId.length > 4 ? `${"*".repeat(cfg.phoneNumberId.length - 4)}${cfg.phoneNumberId.slice(-4)}` : cfg.phoneNumberId ? "Configured" : "Not Set";
+    return {
+      configured: Boolean(cfg.phoneNumberId && cfg.accessToken),
+      hasPhoneNumberId: Boolean(cfg.phoneNumberId),
+      hasAccessToken: Boolean(cfg.accessToken),
+      hasBusinessAccountId: Boolean(cfg.businessAccountId),
+      hasTemplateName: Boolean(cfg.templateName),
+      templateName: cfg.templateName || "Not Set (Text Message Mode)",
+      apiVersion: cfg.apiVersion,
+      phoneNumberIdMasked: masked
+    };
+  }
+  /**
+   * Normalize phone number to digits-only E.164 (e.g. +91 9842112345 -> 919842112345)
+   */
+  normalizePhone(phone, countryCode) {
+    const clean = (phone || "").trim();
+    if (clean.startsWith("+")) {
+      return clean.replace(/\D/g, "");
+    }
+    const digits = clean.replace(/\D/g, "");
+    if (digits.length === 10) {
+      const codeDigits = (countryCode || "91").replace(/\D/g, "") || "91";
+      return `${codeDigits}${digits}`;
+    }
+    if (digits.length === 11 && digits.startsWith("0")) {
+      return `91${digits.slice(1)}`;
+    }
+    return digits;
+  }
+  /**
+   * Build the exact formatted WhatsApp payment verification message and template variables.
+   */
+  buildPaymentConfirmationPayload(order) {
+    const customerName = order.customer.fullName || "Customer";
+    const orderId = order.orderNumber || order.id;
+    const totalQuantity = (order.items || []).reduce((sum, item) => sum + Math.max(1, Number(item.quantity) || 1), 0);
+    const productName = order.items && order.items.length > 0 ? order.items.map((item) => {
+      const cleanName = item.productName.replace(/\s*[–-]\s*/g, " ").trim();
+      return item.weight ? `${cleanName} \u2013 ${item.weight}` : cleanName;
+    }).join(", ") : "Briar Talayar Single Origin Tea \u2013 500g";
+    const amount = Number(order.paymentDetails?.verifiedAmount ?? order.totalAmount ?? 0);
+    const messageText = `Hello ${customerName}!
+
+Your payment has been successfully verified.
+
+Thank you for ordering from KVN Tea Powder!
+
+Order Details:
+Order ID: ${orderId}
+Product: ${productName}
+Quantity: ${totalQuantity}
+Amount Paid: \u20B9${amount}
+Payment Status: VERIFIED \u2713
+
+Your order is now confirmed.
+
+We will notify you when your order is dispatched.
+
+Thank you for choosing KVN Tea Powder!`;
+    return {
+      customerName,
+      orderId,
+      productName,
+      quantity: totalQuantity,
+      amount,
+      messageText
+    };
+  }
+  /**
+   * Send payment-verified WhatsApp confirmation via official Meta WhatsApp Business Cloud API.
+   * Retries temporary network / 5xx / 429 failures up to 3 total attempts safely.
+   */
+  async sendPaymentVerifiedNotification(order) {
+    const cfg = this.getEnvConfig();
+    const msgData = this.buildPaymentConfirmationPayload(order);
+    if (!cfg.phoneNumberId || !cfg.accessToken) {
+      return {
+        success: false,
+        status: "Pending",
+        reason: "not_configured",
+        error: "WhatsApp Business Cloud API credentials are not configured (WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN missing).",
+        attempts: 0,
+        messagePreview: msgData.messageText
+      };
+    }
+    const rawPhone = order.customer.fullPhone || order.customer.phone;
+    const recipientPhone = this.normalizePhone(rawPhone, order.customer.countryCode);
+    if (!recipientPhone || recipientPhone.length < 10) {
+      return {
+        success: false,
+        status: "Failed",
+        reason: "invalid_phone",
+        error: `Invalid customer mobile number: ${rawPhone}`,
+        attempts: 1,
+        messagePreview: msgData.messageText
+      };
+    }
+    const apiUrl = `https://graph.facebook.com/${encodeURIComponent(cfg.apiVersion)}/${encodeURIComponent(cfg.phoneNumberId)}/messages`;
+    const payload = cfg.templateName ? {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: recipientPhone,
+      type: "template",
+      template: {
+        name: cfg.templateName,
+        language: { code: process.env.WHATSAPP_TEMPLATE_LANG || "en" },
+        components: [
+          {
+            type: "body",
+            parameters: [
+              { type: "text", text: msgData.customerName },
+              { type: "text", text: msgData.orderId },
+              { type: "text", text: msgData.productName },
+              { type: "text", text: String(msgData.quantity) },
+              { type: "text", text: String(msgData.amount) }
+            ]
+          }
+        ]
+      }
+    } : {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: recipientPhone,
+      type: "text",
+      text: {
+        preview_url: false,
+        body: msgData.messageText
+      }
+    };
+    const maxAttempts = 3;
+    let lastError = "Unknown WhatsApp dispatch error";
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 7500);
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${cfg.accessToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        }).finally(() => clearTimeout(timeout));
+        const responseData = await response.json().catch(() => ({}));
+        if (response.ok) {
+          const messageId = responseData?.messages?.[0]?.id;
+          return {
+            success: true,
+            status: "Sent",
+            messageId,
+            sentAt: (/* @__PURE__ */ new Date()).toISOString(),
+            attempts: attempt,
+            messagePreview: msgData.messageText
+          };
+        }
+        lastError = responseData?.error?.message || responseData?.error?.error_data?.details || `Meta Cloud API HTTP ${response.status}`;
+        if (response.status !== 429 && response.status < 500) {
+          console.warn(`WhatsApp Cloud API non-retryable error for ${msgData.orderId}:`, lastError);
+          return {
+            success: false,
+            status: "Failed",
+            reason: `http_${response.status}`,
+            error: lastError,
+            attempts: attempt,
+            messagePreview: msgData.messageText
+          };
+        }
+      } catch (err) {
+        lastError = err?.name === "AbortError" ? "WhatsApp Cloud API request timed out" : err?.message || "Network error";
+      }
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 400 * attempt));
+      }
+    }
+    return {
+      success: false,
+      status: "Failed",
+      reason: "api_error",
+      error: lastError,
+      attempts: maxAttempts,
+      messagePreview: msgData.messageText
+    };
+  }
+  async sendOrderConfirmation(order) {
+    return this.sendPaymentVerifiedNotification(order);
+  }
+};
+var whatsappService = new WhatsAppService();
+
 // server/_lib/db.ts
+var HttpError = class extends Error {
+  constructor(statusCode, message) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+};
 var cachedMongoClient = null;
 var cachedDb = null;
 var mongoConnectPromise = null;
@@ -250,7 +525,11 @@ function ensureLocalFile() {
     users: [],
     products: INITIAL_PRODUCTS,
     categories: INITIAL_CATEGORIES,
+    settings: { ...INITIAL_BUSINESS_CONFIG },
+    counters: {},
     webhookEvents: [],
+    whatsappOutbox: [],
+    paymentAuditLogs: [],
     lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
   };
   if (!fs.existsSync(filePath)) {
@@ -270,6 +549,10 @@ function ensureLocalFile() {
     }
     const parsed = JSON.parse(content);
     parsed.webhookEvents = parsed.webhookEvents || [];
+    parsed.whatsappOutbox = parsed.whatsappOutbox || [];
+    parsed.paymentAuditLogs = parsed.paymentAuditLogs || [];
+    parsed.counters = parsed.counters || {};
+    parsed.settings = { ...INITIAL_BUSINESS_CONFIG, ...parsed.settings || {} };
     parsed.orders = parsed.orders || [];
     parsed.users = parsed.users || [];
     parsed.products = parsed.products || INITIAL_PRODUCTS;
@@ -329,6 +612,10 @@ async function getMongoDb() {
       });
       cachedDb.collection("orders").createIndex({ createdAt: -1 }).catch(() => {
       });
+      cachedDb.collection("orders").createIndex({ "paymentDetails.utrNormalized": 1 }).catch(() => {
+      });
+      cachedDb.collection("orders").createIndex({ paymentStatus: 1 }).catch(() => {
+      });
       cachedDb.collection("users").createIndex({ phone: 1 }).catch(() => {
       });
       cachedDb.collection("users").createIndex({ email: 1 }).catch(() => {
@@ -339,9 +626,21 @@ async function getMongoDb() {
       });
       cachedDb.collection("categories").createIndex({ id: 1 }, { unique: true }).catch(() => {
       });
+      cachedDb.collection("settings").createIndex({ id: 1 }, { unique: true }).catch(() => {
+      });
+      cachedDb.collection("counters").createIndex({ id: 1 }, { unique: true }).catch(() => {
+      });
       cachedDb.collection("webhook_outbox").createIndex({ eventId: 1 }, { unique: true }).catch(() => {
       });
       cachedDb.collection("webhook_outbox").createIndex({ status: 1 }).catch(() => {
+      });
+      cachedDb.collection("whatsapp_notifications").createIndex({ idempotencyKey: 1 }, { unique: true }).catch(() => {
+      });
+      cachedDb.collection("whatsapp_notifications").createIndex({ status: 1 }).catch(() => {
+      });
+      cachedDb.collection("payment_audit_logs").createIndex({ timestamp: -1 }).catch(() => {
+      });
+      cachedDb.collection("payment_audit_logs").createIndex({ orderId: 1 }).catch(() => {
       });
       cachedDb.collection("products").countDocuments().then(async (count) => {
         if (count === 0 && cachedDb) {
@@ -436,11 +735,134 @@ var serverDb = {
     });
     return Boolean(recent);
   },
+  // ===================== SETTINGS & ORDER SEQUENCES =====================
+  async getStoreSettings() {
+    let stored = null;
+    const db = await getMongoDb();
+    if (db) {
+      const doc = await db.collection("settings").findOne({ id: "default" });
+      if (doc) {
+        const { _id, id: _docId, ...rest } = doc;
+        stored = rest;
+      }
+    } else {
+      const state = ensureLocalFile();
+      stored = state.settings || null;
+    }
+    const merged = {
+      ...INITIAL_BUSINESS_CONFIG,
+      ...stored || {}
+    };
+    const envUpi = (process.env.MERCHANT_UPI_ID || "").trim();
+    const envMerchant = (process.env.MERCHANT_UPI_NAME || "").trim();
+    const effectiveUpiId = (merged.upiId || envUpi || "").trim();
+    const effectiveMerchantName = (merged.merchantName || envMerchant || "KVN Tea Powder").trim() || "KVN Tea Powder";
+    return {
+      ...merged,
+      upiId: effectiveUpiId,
+      merchantName: effectiveMerchantName,
+      upiConfigured: isValidUpiId(effectiveUpiId)
+    };
+  },
+  async saveStoreSettings(updates) {
+    const current = await this.getStoreSettings();
+    const cleanUpi = updates.upiId !== void 0 ? updates.upiId.trim() : (current.upiId || "").trim();
+    if (cleanUpi && !isValidUpiId(cleanUpi)) {
+      throw new HttpError(400, "Please enter a valid UPI ID (for example: kavinash@okicici or 6383050287@ybl).");
+    }
+    const nextSettings = {
+      ...current,
+      ...updates,
+      upiId: cleanUpi,
+      merchantName: (updates.merchantName ?? current.merchantName ?? "KVN Tea Powder").trim() || "KVN Tea Powder",
+      upiConfigured: isValidUpiId(cleanUpi)
+    };
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection("settings").updateOne(
+        { id: "default" },
+        { $set: { id: "default", ...nextSettings, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } },
+        { upsert: true }
+      );
+    }
+    const state = ensureLocalFile();
+    state.settings = nextSettings;
+    await saveLocalFile(state);
+    return nextSettings;
+  },
+  async getNextOrderNumber() {
+    const istDate = new Date(Date.now() + 5.5 * 3600 * 1e3).toISOString().slice(0, 10).replace(/-/g, "");
+    const counterId = `ord_seq_${istDate}`;
+    const db = await getMongoDb();
+    if (db) {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const res = await db.collection("counters").findOneAndUpdate(
+          { id: counterId },
+          { $inc: { seq: 1 } },
+          { upsert: true, returnDocument: "after" }
+        );
+        const seqNum = Number(res?.seq || 1);
+        const candidate2 = `KVN-ORD-${istDate}-${String(seqNum).padStart(3, "0")}`;
+        const clash = await db.collection("orders").findOne({ orderNumber: candidate2 });
+        if (!clash) return candidate2;
+      }
+      return `KVN-ORD-${istDate}-${Math.floor(1e3 + Math.random() * 9e3)}`;
+    }
+    const state = ensureLocalFile();
+    state.counters = state.counters || {};
+    let seq = Number(state.counters[counterId] || 0) + 1;
+    let candidate = `KVN-ORD-${istDate}-${String(seq).padStart(3, "0")}`;
+    while (state.orders.some((o) => o.orderNumber === candidate)) {
+      seq++;
+      candidate = `KVN-ORD-${istDate}-${String(seq).padStart(3, "0")}`;
+    }
+    state.counters[counterId] = seq;
+    await saveLocalFile(state);
+    return candidate;
+  },
+  async recordPaymentAudit(entry) {
+    const db = await getMongoDb();
+    if (db) {
+      await db.collection("payment_audit_logs").insertOne(entry).catch(() => {
+      });
+      return;
+    }
+    const state = ensureLocalFile();
+    state.paymentAuditLogs = state.paymentAuditLogs || [];
+    state.paymentAuditLogs.unshift(entry);
+    if (state.paymentAuditLogs.length > 500) {
+      state.paymentAuditLogs = state.paymentAuditLogs.slice(0, 500);
+    }
+    await saveLocalFile(state);
+  },
   async createOrder(orderData) {
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const randomSuffix = Math.floor(100 + Math.random() * 900);
     const orderId = `ord-${Date.now()}-${randomSuffix}`;
-    const orderNumber = `KVN-${Date.now().toString().slice(-6)}-${randomSuffix}`;
+    const orderNumber = await this.getNextOrderNumber();
+    const paymentMethod = orderData.paymentMethod || "COD";
+    const isUpi = paymentMethod === "ONLINE_UPI";
+    const storeSettings = await this.getStoreSettings();
+    const upiPaymentInfo = isUpi ? buildUpiPaymentInfo({
+      upiId: storeSettings.upiId,
+      merchantName: storeSettings.merchantName || "KVN Tea Powder",
+      orderNumber,
+      customerName: orderData.customer?.fullName || "Customer",
+      amount: Number(orderData.totalAmount || 0)
+    }) : void 0;
+    const initialPaymentStatus = isUpi ? "PAYMENT_PENDING" : orderData.paymentStatus || "Pending";
+    const initialOrderStatus = isUpi ? "Payment Pending" : orderData.orderStatus || "Order Confirmed";
+    const initialAudit = {
+      id: `aud-${Date.now()}-${randomSuffix}`,
+      orderId,
+      orderNumber,
+      action: "ORDER_CREATED",
+      actor: orderData.customer?.fullName || "Customer",
+      newPaymentStatus: initialPaymentStatus,
+      amount: Number(orderData.totalAmount || 0),
+      note: isUpi ? "Order created awaiting UPI payment & UTR verification" : "COD order created",
+      timestamp: now
+    };
     const newOrder = {
       id: orderId,
       orderNumber,
@@ -453,17 +875,23 @@ var serverDb = {
       discountAmount: orderData.discountAmount || 0,
       couponCode: orderData.couponCode,
       totalAmount: orderData.totalAmount,
-      paymentMethod: orderData.paymentMethod || "COD",
-      paymentStatus: orderData.paymentStatus || "Pending",
-      orderStatus: orderData.orderStatus || "Order Confirmed",
+      paymentMethod,
+      paymentStatus: initialPaymentStatus,
+      orderStatus: initialOrderStatus,
       statusHistory: [
         {
-          status: orderData.orderStatus || "Order Confirmed",
+          status: initialOrderStatus,
           timestamp: now,
-          note: "Order placed by customer via online store"
+          note: isUpi ? "Order created. Complete UPI payment and submit your Transaction ID / UTR for verification." : "Order placed by customer via online store"
         }
       ],
-      whatsappStatus: orderData.whatsappStatus || "pending",
+      stockDeducted: !isUpi,
+      stockDeductedAt: !isUpi ? now : void 0,
+      whatsappConsent: orderData.whatsappConsent !== false,
+      whatsappStatus: isUpi ? "Pending" : orderData.whatsappStatus || (whatsappService.isConfigured() ? "Pending" : "not_configured"),
+      upiPaymentInfo,
+      paymentDetails: {},
+      paymentAuditLog: [initialAudit],
       excelSyncStatus: orderData.excelSyncStatus || "pending",
       notes: orderData.notes || "",
       createdAt: now,
@@ -476,14 +904,533 @@ var serverDb = {
     }
     if (db) {
       await db.collection("orders").insertOne(newOrder);
-      await this.decrementProductStock(orderData.items).catch((e) => console.warn("Stock decrement warning:", e));
+      if (!isUpi) {
+        await this.decrementProductStock(orderData.items).catch((e) => console.warn("Stock decrement warning:", e));
+      }
+      await this.recordPaymentAudit(initialAudit);
       return newOrder;
     }
     const state = ensureLocalFile();
     state.orders.unshift(newOrder);
     await saveLocalFile(state);
-    await this.decrementProductStock(orderData.items).catch((e) => console.warn("Stock decrement warning:", e));
+    if (!isUpi) {
+      await this.decrementProductStock(orderData.items).catch((e) => console.warn("Stock decrement warning:", e));
+    }
+    await this.recordPaymentAudit(initialAudit);
     return newOrder;
+  },
+  async submitOrderPaymentProof(orderIdOrNumber, proof) {
+    const existing = await this.getOrderById(orderIdOrNumber);
+    if (!existing) {
+      throw new HttpError(404, "Order not found");
+    }
+    if (existing.paymentStatus === "PAID" || existing.paymentStatus === "Paid") {
+      throw new HttpError(409, "Payment for this order has already been verified.");
+    }
+    if (!proof.utr || !isValidUtr(proof.utr)) {
+      throw new HttpError(400, "Please enter a valid UPI Transaction ID / UTR (6 to 40 letters or digits).");
+    }
+    const utrTrimmed = proof.utr.trim();
+    const utrNormalized = normalizeUtr(utrTrimmed);
+    const cleanPayerName = (proof.submittedPayerName || "").trim().slice(0, 80);
+    const cleanScreenshot = (proof.paymentScreenshotUrl || "").trim();
+    if (cleanScreenshot.startsWith("data:image/") && cleanScreenshot.length > 2e5) {
+      throw new HttpError(413, "Screenshot image is too large (>150KB). Please choose a smaller image.");
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const auditEntry = {
+      id: `aud-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      orderId: existing.id,
+      orderNumber: existing.orderNumber,
+      action: "UTR_SUBMITTED",
+      actor: cleanPayerName || existing.customer.fullName,
+      previousPaymentStatus: existing.paymentStatus,
+      newPaymentStatus: "PAYMENT_PENDING",
+      utr: utrNormalized,
+      amount: existing.totalAmount,
+      note: cleanPayerName ? `UTR submitted by payer: ${cleanPayerName}` : "Customer submitted UTR for verification",
+      timestamp: now
+    };
+    const nextDetails = {
+      ...existing.paymentDetails || {},
+      utr: utrTrimmed,
+      utrNormalized,
+      submittedPayerName: cleanPayerName || existing.paymentDetails?.submittedPayerName,
+      paymentScreenshotUrl: cleanScreenshot || existing.paymentDetails?.paymentScreenshotUrl,
+      paymentSubmittedAt: now,
+      rejectionReason: void 0,
+      rejectedAt: void 0,
+      rejectedBy: void 0
+    };
+    const db = await getMongoDb();
+    if (db) {
+      const duplicate2 = await db.collection("orders").findOne({
+        id: { $ne: existing.id },
+        "paymentDetails.utrNormalized": utrNormalized,
+        paymentStatus: { $in: ["PAYMENT_PENDING", "Pending", "PAID", "Paid"] }
+      });
+      if (duplicate2) {
+        throw new HttpError(409, `UPI Transaction ID / UTR "${utrNormalized}" has already been submitted on another order.`);
+      }
+      await db.collection("orders").updateOne(
+        { id: existing.id },
+        {
+          $set: {
+            paymentStatus: "PAYMENT_PENDING",
+            orderStatus: "Payment Pending",
+            paymentDetails: nextDetails,
+            updatedAt: now
+          },
+          $push: {
+            statusHistory: {
+              status: "Payment Pending",
+              timestamp: now,
+              note: `UTR ${utrNormalized} submitted. Awaiting bank verification.`
+            },
+            paymentAuditLog: auditEntry
+          }
+        }
+      );
+      await this.recordPaymentAudit(auditEntry);
+      return await this.getOrderById(existing.id);
+    }
+    const state = ensureLocalFile();
+    const duplicate = state.orders.find(
+      (o) => o.id !== existing.id && o.paymentDetails?.utrNormalized === utrNormalized && ["PAYMENT_PENDING", "Pending", "PAID", "Paid"].includes(o.paymentStatus)
+    );
+    if (duplicate) {
+      throw new HttpError(409, `UPI Transaction ID / UTR "${utrNormalized}" has already been submitted on another order.`);
+    }
+    const idx = state.orders.findIndex((o) => o.id === existing.id);
+    if (idx === -1) throw new HttpError(404, "Order not found");
+    state.orders[idx] = {
+      ...state.orders[idx],
+      paymentStatus: "PAYMENT_PENDING",
+      orderStatus: "Payment Pending",
+      paymentDetails: nextDetails,
+      updatedAt: now,
+      statusHistory: [
+        ...state.orders[idx].statusHistory,
+        {
+          status: "Payment Pending",
+          timestamp: now,
+          note: `UTR ${utrNormalized} submitted. Awaiting bank verification.`
+        }
+      ],
+      paymentAuditLog: [...state.orders[idx].paymentAuditLog || [], auditEntry]
+    };
+    await saveLocalFile(state);
+    await this.recordPaymentAudit(auditEntry);
+    return state.orders[idx];
+  },
+  async verifyStockAvailableForItems(items) {
+    if (!items || items.length === 0) return;
+    const products = await this.getAllProducts(false);
+    for (const item of items) {
+      const prod = products.find((p) => p.id === item.productId);
+      if (!prod) {
+        throw new HttpError(409, `Product "${item.productName}" is no longer available in inventory.`);
+      }
+      const variant = prod.variants?.find((v) => v.id === item.variantId || v.weight === item.weight) || prod.variants?.[0];
+      const needed = Math.max(1, Number(item.quantity) || 1);
+      const available = Number(variant?.stock || 0);
+      if (!variant || available < needed) {
+        throw new HttpError(
+          409,
+          `Insufficient stock for "${prod.name} (${item.weight})": requested ${needed}, only ${available} remaining.`
+        );
+      }
+    }
+  },
+  async approveOrderPayment(orderIdOrNumber, params) {
+    const existing = await this.getOrderById(orderIdOrNumber);
+    if (!existing) {
+      throw new HttpError(404, "Order not found");
+    }
+    if (existing.paymentStatus !== "PAYMENT_PENDING" && existing.paymentStatus !== "Pending") {
+      throw new HttpError(409, `Cannot approve: Order payment status is already "${existing.paymentStatus}".`);
+    }
+    const rawUtr = (params.utrOverride || existing.paymentDetails?.utr || "").trim();
+    const isUpi = existing.paymentMethod === "ONLINE_UPI";
+    if (isUpi && !isValidUtr(rawUtr)) {
+      throw new HttpError(400, "Cannot approve UPI payment without a valid UPI Transaction ID / UTR.");
+    }
+    const utrNormalized = rawUtr ? normalizeUtr(rawUtr) : void 0;
+    const expectedAmount = Number(existing.totalAmount || 0);
+    const verifiedAmount = params.verifiedAmount !== void 0 ? Number(params.verifiedAmount) : expectedAmount;
+    if (Math.abs(verifiedAmount - expectedAmount) > 0.01) {
+      throw new HttpError(
+        400,
+        `Verified amount \u20B9${verifiedAmount} does not match authoritative order total \u20B9${expectedAmount}.`
+      );
+    }
+    if (!existing.stockDeducted) {
+      await this.verifyStockAvailableForItems(existing.items);
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const adminIdentity = (params.adminIdentity || "Kavinash (Admin)").trim();
+    const verifiedPayerName = (params.verifiedPayerName || existing.paymentDetails?.submittedPayerName || "").trim() || void 0;
+    const auditEntry = {
+      id: `aud-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      orderId: existing.id,
+      orderNumber: existing.orderNumber,
+      action: "PAYMENT_APPROVED",
+      actor: adminIdentity,
+      previousPaymentStatus: existing.paymentStatus,
+      newPaymentStatus: "PAID",
+      utr: utrNormalized,
+      amount: verifiedAmount,
+      note: params.adminNote?.trim() || `Payment \u20B9${verifiedAmount} manually verified by ${adminIdentity}${verifiedPayerName ? ` (Payer: ${verifiedPayerName})` : ""}`,
+      timestamp: now
+    };
+    const nextDetails = {
+      ...existing.paymentDetails || {},
+      utr: rawUtr || existing.paymentDetails?.utr,
+      utrNormalized: utrNormalized || existing.paymentDetails?.utrNormalized,
+      verifiedAmount,
+      verifiedPayerName,
+      verifiedAt: now,
+      verifiedBy: adminIdentity,
+      rejectionReason: void 0,
+      rejectedAt: void 0,
+      rejectedBy: void 0
+    };
+    const db = await getMongoDb();
+    if (db) {
+      if (utrNormalized) {
+        const duplicatePaid = await db.collection("orders").findOne({
+          id: { $ne: existing.id },
+          "paymentDetails.utrNormalized": utrNormalized,
+          paymentStatus: { $in: ["PAID", "Paid"] }
+        });
+        if (duplicatePaid) {
+          throw new HttpError(
+            409,
+            `Duplicate UTR blocked: "${utrNormalized}" has already been verified on order ${duplicatePaid.orderNumber}.`
+          );
+        }
+      }
+      const atomicRes = await db.collection("orders").findOneAndUpdate(
+        {
+          id: existing.id,
+          paymentStatus: { $in: ["PAYMENT_PENDING", "Pending"] }
+        },
+        {
+          $set: {
+            paymentStatus: "PAID",
+            orderStatus: "Order Confirmed",
+            stockDeducted: true,
+            stockDeductedAt: existing.stockDeductedAt || now,
+            paymentDetails: nextDetails,
+            updatedAt: now
+          },
+          $push: {
+            statusHistory: {
+              $each: [
+                {
+                  status: "Payment Confirmed",
+                  timestamp: now,
+                  note: `Payment \u20B9${verifiedAmount} verified by ${adminIdentity}${utrNormalized ? ` (UTR: ${utrNormalized})` : ""}`
+                },
+                {
+                  status: "Order Confirmed",
+                  timestamp: now,
+                  note: "Order confirmed after payment verification"
+                }
+              ]
+            },
+            paymentAuditLog: auditEntry
+          }
+        },
+        { returnDocument: "after" }
+      );
+      if (!atomicRes) {
+        throw new HttpError(409, "Order payment was already verified or modified concurrently.");
+      }
+      if (!existing.stockDeducted) {
+        await this.decrementProductStock(existing.items);
+      }
+      await this.recordPaymentAudit(auditEntry);
+      const { _id, ...cleanOrder } = atomicRes;
+      return cleanOrder;
+    }
+    const state = ensureLocalFile();
+    if (utrNormalized) {
+      const duplicatePaid = state.orders.find(
+        (o) => o.id !== existing.id && o.paymentDetails?.utrNormalized === utrNormalized && ["PAID", "Paid"].includes(o.paymentStatus)
+      );
+      if (duplicatePaid) {
+        throw new HttpError(
+          409,
+          `Duplicate UTR blocked: "${utrNormalized}" has already been verified on order ${duplicatePaid.orderNumber}.`
+        );
+      }
+    }
+    const idx = state.orders.findIndex(
+      (o) => o.id === existing.id && ["PAYMENT_PENDING", "Pending"].includes(o.paymentStatus)
+    );
+    if (idx === -1) {
+      throw new HttpError(409, "Order payment was already verified or modified.");
+    }
+    const shouldDeduct = !state.orders[idx].stockDeducted;
+    state.orders[idx] = {
+      ...state.orders[idx],
+      paymentStatus: "PAID",
+      orderStatus: "Order Confirmed",
+      stockDeducted: true,
+      stockDeductedAt: state.orders[idx].stockDeductedAt || now,
+      paymentDetails: nextDetails,
+      updatedAt: now,
+      statusHistory: [
+        ...state.orders[idx].statusHistory,
+        {
+          status: "Payment Confirmed",
+          timestamp: now,
+          note: `Payment \u20B9${verifiedAmount} verified by ${adminIdentity}${utrNormalized ? ` (UTR: ${utrNormalized})` : ""}`
+        },
+        {
+          status: "Order Confirmed",
+          timestamp: now,
+          note: "Order confirmed after payment verification"
+        }
+      ],
+      paymentAuditLog: [...state.orders[idx].paymentAuditLog || [], auditEntry]
+    };
+    await saveLocalFile(state);
+    if (shouldDeduct) {
+      await this.decrementProductStock(state.orders[idx].items);
+    }
+    await this.recordPaymentAudit(auditEntry);
+    return state.orders[idx];
+  },
+  async rejectOrderPayment(orderIdOrNumber, params) {
+    const existing = await this.getOrderById(orderIdOrNumber);
+    if (!existing) {
+      throw new HttpError(404, "Order not found");
+    }
+    if (existing.paymentStatus !== "PAYMENT_PENDING" && existing.paymentStatus !== "Pending") {
+      throw new HttpError(409, `Cannot reject: Order payment status is already "${existing.paymentStatus}".`);
+    }
+    const reason = (params.reason || "Transaction could not be verified in bank statement").trim();
+    const adminIdentity = (params.adminIdentity || "Kavinash (Admin)").trim();
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const auditEntry = {
+      id: `aud-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      orderId: existing.id,
+      orderNumber: existing.orderNumber,
+      action: "PAYMENT_REJECTED",
+      actor: adminIdentity,
+      previousPaymentStatus: existing.paymentStatus,
+      newPaymentStatus: "REJECTED",
+      utr: existing.paymentDetails?.utrNormalized,
+      amount: existing.totalAmount,
+      note: reason,
+      timestamp: now
+    };
+    const nextDetails = {
+      ...existing.paymentDetails || {},
+      rejectedAt: now,
+      rejectedBy: adminIdentity,
+      rejectionReason: reason
+    };
+    const db = await getMongoDb();
+    if (db) {
+      const res = await db.collection("orders").findOneAndUpdate(
+        { id: existing.id, paymentStatus: { $in: ["PAYMENT_PENDING", "Pending"] } },
+        {
+          $set: {
+            paymentStatus: "REJECTED",
+            orderStatus: "Cancelled",
+            paymentDetails: nextDetails,
+            updatedAt: now
+          },
+          $push: {
+            statusHistory: {
+              status: "Cancelled",
+              timestamp: now,
+              note: `Payment rejected by ${adminIdentity}: ${reason}`
+            },
+            paymentAuditLog: auditEntry
+          }
+        },
+        { returnDocument: "after" }
+      );
+      if (!res) {
+        throw new HttpError(409, "Order payment status was already modified.");
+      }
+      await this.recordPaymentAudit(auditEntry);
+      const { _id, ...cleanOrder } = res;
+      return cleanOrder;
+    }
+    const state = ensureLocalFile();
+    const idx = state.orders.findIndex(
+      (o) => o.id === existing.id && ["PAYMENT_PENDING", "Pending"].includes(o.paymentStatus)
+    );
+    if (idx === -1) {
+      throw new HttpError(409, "Order payment status was already modified.");
+    }
+    state.orders[idx] = {
+      ...state.orders[idx],
+      paymentStatus: "REJECTED",
+      orderStatus: "Cancelled",
+      paymentDetails: nextDetails,
+      updatedAt: now,
+      statusHistory: [
+        ...state.orders[idx].statusHistory,
+        {
+          status: "Cancelled",
+          timestamp: now,
+          note: `Payment rejected by ${adminIdentity}: ${reason}`
+        }
+      ],
+      paymentAuditLog: [...state.orders[idx].paymentAuditLog || [], auditEntry]
+    };
+    await saveLocalFile(state);
+    await this.recordPaymentAudit(auditEntry);
+    return state.orders[idx];
+  },
+  async dispatchIdempotentPaymentWhatsApp(orderIdOrNumber, forceRetry = false) {
+    const order = await this.getOrderById(orderIdOrNumber);
+    if (!order) {
+      throw new HttpError(404, "Order not found");
+    }
+    const isPaymentApproved = order.paymentStatus === "PAID" || order.paymentStatus === "Paid";
+    const isCodConfirmed = order.paymentMethod === "COD" && order.orderStatus !== "Cancelled";
+    if (!isPaymentApproved && !isCodConfirmed) {
+      throw new HttpError(409, "WhatsApp confirmation can only be sent after payment verification or COD confirmation.");
+    }
+    const idempotencyKey = `wa_payment_verified_${order.id}`;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const payloadData = whatsappService.buildPaymentConfirmationPayload(order);
+    const recipientPhone = whatsappService.normalizePhone(
+      order.customer.fullPhone || order.customer.phone,
+      order.customer.countryCode
+    );
+    const db = await getMongoDb();
+    let existingOutbox = null;
+    if (db) {
+      const doc = await db.collection("whatsapp_notifications").findOne({ idempotencyKey });
+      if (doc) {
+        const { _id, ...rest } = doc;
+        existingOutbox = rest;
+      }
+    } else {
+      const state = ensureLocalFile();
+      existingOutbox = (state.whatsappOutbox || []).find((w) => w.idempotencyKey === idempotencyKey) || null;
+    }
+    if (existingOutbox && existingOutbox.status === "Sent") {
+      return { alreadySent: true, outbox: existingOutbox, order };
+    }
+    if (existingOutbox && !forceRetry && existingOutbox.attempts >= existingOutbox.maxAttempts) {
+      return { alreadySent: false, outbox: existingOutbox, order };
+    }
+    const baseOutbox = existingOutbox || {
+      id: `wa-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      idempotencyKey,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      recipientPhone,
+      customerName: order.customer.fullName,
+      templateName: (process.env.WHATSAPP_TEMPLATE_NAME || "").trim() || void 0,
+      messagePreview: payloadData.messageText,
+      status: "Pending",
+      attempts: 0,
+      maxAttempts: 5,
+      createdAt: now,
+      updatedAt: now
+    };
+    if (order.whatsappConsent === false && !forceRetry) {
+      const optOutRecord = {
+        ...baseOutbox,
+        status: "Pending",
+        reason: "Customer did not opt in to WhatsApp updates at checkout",
+        updatedAt: now
+      };
+      if (db) {
+        await db.collection("whatsapp_notifications").updateOne(
+          { idempotencyKey },
+          { $set: optOutRecord },
+          { upsert: true }
+        );
+      } else {
+        const state = ensureLocalFile();
+        state.whatsappOutbox = (state.whatsappOutbox || []).filter((w) => w.idempotencyKey !== idempotencyKey);
+        state.whatsappOutbox.unshift(optOutRecord);
+        await saveLocalFile(state);
+      }
+      const updated = await this.updateOrderSyncStatuses(order.id, {
+        whatsappStatus: "opted_out",
+        whatsappError: optOutRecord.reason
+      });
+      return { alreadySent: false, outbox: optOutRecord, order: updated };
+    }
+    const result = await whatsappService.sendPaymentVerifiedNotification(order);
+    const completedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const updatedOutbox = {
+      ...baseOutbox,
+      status: result.status,
+      reason: result.success ? void 0 : result.error || result.reason,
+      attempts: baseOutbox.attempts + Math.max(1, result.attempts || 1),
+      whatsappMessageId: result.messageId || baseOutbox.whatsappMessageId,
+      lastAttemptAt: completedAt,
+      sentAt: result.sentAt || baseOutbox.sentAt,
+      messagePreview: result.messagePreview,
+      updatedAt: completedAt
+    };
+    if (db) {
+      await db.collection("whatsapp_notifications").updateOne(
+        { idempotencyKey },
+        { $set: updatedOutbox },
+        { upsert: true }
+      );
+    } else {
+      const state = ensureLocalFile();
+      state.whatsappOutbox = (state.whatsappOutbox || []).filter((w) => w.idempotencyKey !== idempotencyKey);
+      state.whatsappOutbox.unshift(updatedOutbox);
+      await saveLocalFile(state);
+    }
+    const updatedOrder = await this.updateOrderSyncStatuses(order.id, {
+      whatsappStatus: result.status,
+      whatsappMessageId: result.messageId,
+      whatsappSentAt: result.sentAt,
+      whatsappError: result.success ? void 0 : result.error
+    });
+    await this.recordPaymentAudit({
+      id: `aud-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      action: result.success ? "WHATSAPP_SENT" : "WHATSAPP_FAILED",
+      actor: "WhatsApp Cloud API Service",
+      note: result.success ? `Confirmation sent to +${recipientPhone} (Message ID: ${result.messageId || "accepted"})` : result.error || "Notification queued as Pending/Failed",
+      timestamp: completedAt
+    });
+    return { alreadySent: false, outbox: updatedOutbox, order: updatedOrder };
+  },
+  async getWhatsAppOutboxAll() {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection("whatsapp_notifications").find({}).sort({ updatedAt: -1 }).limit(100).toArray();
+      return docs.map((d) => {
+        const { _id, ...rest } = d;
+        return rest;
+      });
+    }
+    const state = ensureLocalFile();
+    return [...state.whatsappOutbox || []].sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    );
+  },
+  async getPaymentAuditLogs(limit = 100) {
+    const db = await getMongoDb();
+    if (db) {
+      const docs = await db.collection("payment_audit_logs").find({}).sort({ timestamp: -1 }).limit(limit).toArray();
+      return docs.map((d) => {
+        const { _id, ...rest } = d;
+        return rest;
+      });
+    }
+    const state = ensureLocalFile();
+    return (state.paymentAuditLogs || []).slice(0, limit);
   },
   async updateOrderSyncStatuses(orderId, updates) {
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -1241,16 +2188,45 @@ function verifyAdminToken(token) {
 }
 
 // server/_lib/validation.ts
-function validatePhone(phone) {
+function validatePhone(phone, countryCode = "+91") {
   if (!phone) {
-    return { valid: false, normalized: "", error: "Mobile number is required" };
+    return { valid: false, normalized: "", fullPhone: "", countryCode: "+91", error: "Mobile number is required" };
+  }
+  const trimmed = phone.trim();
+  let effectiveCode = (countryCode || "+91").trim();
+  if (trimmed.startsWith("+") && !countryCode) {
+    const match = trimmed.match(/^(\+\d{1,4})/);
+    if (match) effectiveCode = match[1];
+  }
+  if (!effectiveCode.startsWith("+")) {
+    effectiveCode = `+${effectiveCode.replace(/\D/g, "") || "91"}`;
   }
   const digits = phone.replace(/\D/g, "");
-  const normalized = digits.length === 12 && digits.startsWith("91") ? digits.slice(2) : digits;
-  if (!/^[6-9]\d{9}$/.test(normalized)) {
-    return { valid: false, normalized, error: "Please enter a valid 10-digit Indian mobile number" };
+  const codeDigits = effectiveCode.replace(/\D/g, "") || "91";
+  if (codeDigits === "91") {
+    const normalized2 = digits.length === 12 && digits.startsWith("91") ? digits.slice(2) : digits;
+    if (!/^[6-9]\d{9}$/.test(normalized2)) {
+      return {
+        valid: false,
+        normalized: normalized2,
+        fullPhone: "",
+        countryCode: "+91",
+        error: "Please enter a valid 10-digit Indian mobile number"
+      };
+    }
+    return { valid: true, normalized: normalized2, fullPhone: `+91${normalized2}`, countryCode: "+91" };
   }
-  return { valid: true, normalized };
+  const normalized = digits.startsWith(codeDigits) && digits.length > codeDigits.length + 5 ? digits.slice(codeDigits.length) : digits;
+  if (!/^\d{6,14}$/.test(normalized)) {
+    return {
+      valid: false,
+      normalized,
+      fullPhone: "",
+      countryCode: effectiveCode,
+      error: "Please enter a valid mobile number with country code"
+    };
+  }
+  return { valid: true, normalized, fullPhone: `+${codeDigits}${normalized}`, countryCode: effectiveCode };
 }
 function validatePincode(pincode) {
   if (!pincode || !/^[1-9][0-9]{5}$/.test(pincode.trim())) {
@@ -1262,7 +2238,7 @@ function validateAddress(customer) {
   if (!customer.fullName || customer.fullName.trim().length < 2) {
     return { valid: false, error: "Full name is required (minimum 2 characters)" };
   }
-  const phoneVal = validatePhone(customer.phone || "");
+  const phoneVal = validatePhone(customer.phone || "", customer.countryCode || "+91");
   if (!phoneVal.valid) {
     return { valid: false, error: phoneVal.error };
   }
@@ -1610,132 +2586,6 @@ var webhookService = {
   }
 };
 
-// server/_lib/whatsapp.ts
-var WhatsAppService = class {
-  constructor() {
-    this.phoneNumberId = (process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
-    this.accessToken = (process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
-    this.templateName = (process.env.WHATSAPP_TEMPLATE_NAME || "").trim();
-  }
-  isConfigured() {
-    return Boolean(this.phoneNumberId && this.accessToken);
-  }
-  /**
-   * Normalize an Indian phone number to E.164 format without leading '+'
-   * (e.g. 9787513911 -> 919787513911)
-   */
-  normalizePhone(phone) {
-    const digits = phone.replace(/\D/g, "");
-    if (digits.length === 10) {
-      return `91${digits}`;
-    }
-    if (digits.length === 12 && digits.startsWith("91")) {
-      return digits;
-    }
-    if (digits.length === 11 && digits.startsWith("0")) {
-      return `91${digits.slice(1)}`;
-    }
-    return digits;
-  }
-  /**
-   * Send WhatsApp order confirmation message via Meta WhatsApp Business Cloud API.
-   * If credentials are not configured, gracefully logs and records 'not_configured'.
-   */
-  async sendOrderConfirmation(order) {
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    if (!this.isConfigured()) {
-      return {
-        success: false,
-        status: "not_configured",
-        error: "WhatsApp Business Cloud API credentials not configured (WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN missing)"
-      };
-    }
-    const recipientPhone = this.normalizePhone(order.customer.phone);
-    if (!recipientPhone || recipientPhone.length < 10) {
-      return {
-        success: false,
-        status: "failed",
-        error: `Invalid customer phone number: ${order.customer.phone}`
-      };
-    }
-    const shortAddress = `${order.customer.address}, ${order.customer.villageTown} - ${order.customer.pincode}`;
-    const orderId = order.orderNumber || order.id;
-    const total = order.totalAmount;
-    const messageText = `Thank you for ordering from KVN Tea Powder! Your order has been placed successfully.
-
-Order ID: ${orderId}
-Order Total: \u20B9${total}
-Delivery Address: ${shortAddress}
-
-We will update you when your order status changes.`;
-    const apiUrl = `https://graph.facebook.com/v21.0/${this.phoneNumberId}/messages`;
-    const payload = this.templateName ? {
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to: recipientPhone,
-      type: "template",
-      template: {
-        name: this.templateName,
-        language: { code: "en" },
-        components: [
-          {
-            type: "body",
-            parameters: [
-              { type: "text", text: orderId },
-              { type: "text", text: String(total) },
-              { type: "text", text: shortAddress }
-            ]
-          }
-        ]
-      }
-    } : {
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to: recipientPhone,
-      type: "text",
-      text: {
-        preview_url: false,
-        body: messageText
-      }
-    };
-    try {
-      const response = await fetch(apiUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${this.accessToken}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
-      });
-      const responseData = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const errorDetail = responseData?.error?.message || responseData?.error?.error_data?.details || `HTTP ${response.status}`;
-        console.warn(`WhatsApp Cloud API error for order ${orderId}:`, errorDetail);
-        return {
-          success: false,
-          status: "failed",
-          error: errorDetail
-        };
-      }
-      const messageId = responseData?.messages?.[0]?.id;
-      return {
-        success: true,
-        status: "sent",
-        messageId,
-        sentAt: now
-      };
-    } catch (err) {
-      console.error(`WhatsApp dispatch network exception for order ${orderId}:`, err);
-      return {
-        success: false,
-        status: "failed",
-        error: err.message || "Network error communicating with WhatsApp Cloud API"
-      };
-    }
-  }
-};
-var whatsappService = new WhatsAppService();
-
 // server/_lib/excelSync.ts
 var ExcelSyncService = class {
   constructor() {
@@ -1984,6 +2834,53 @@ router.get(["/", "/health"], async (_req, res) => {
     });
   }
 });
+router.get("/settings/public", async (_req, res) => {
+  try {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    const settings = await serverDb.getStoreSettings();
+    return res.json({
+      settings: {
+        name: settings.name,
+        owner: settings.owner,
+        primaryPhone: settings.primaryPhone,
+        secondaryPhone: settings.secondaryPhone,
+        email: settings.email,
+        defaultDeliveryCharge: settings.defaultDeliveryCharge,
+        freeDeliveryThreshold: settings.freeDeliveryThreshold,
+        fssaiNumber: settings.fssaiNumber || "",
+        gstNumber: settings.gstNumber || "",
+        upiId: settings.upiId || "",
+        merchantName: settings.merchantName || "KVN Tea Powder",
+        upiConfigured: Boolean(settings.upiConfigured)
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load public storefront configuration" });
+  }
+});
+router.get("/payments/cloudinary-sign", rateLimiter(20, 6e4), (_req, res) => {
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  const folder = "kvn_payment_proofs";
+  if (!cloudName || !apiKey || !apiSecret) {
+    return res.json({
+      configured: false,
+      message: "Cloudinary image hosting is not configured on the server."
+    });
+  }
+  const timestamp = Math.floor(Date.now() / 1e3);
+  const toSign = `folder=${folder}&timestamp=${timestamp}${apiSecret}`;
+  const signature = crypto3.createHash("sha1").update(toSign).digest("hex");
+  return res.json({
+    configured: true,
+    cloudName,
+    apiKey,
+    folder,
+    timestamp,
+    signature
+  });
+});
 router.post("/auth/firebase-sync", rateLimiter(20, 6e4), async (req, res) => {
   try {
     const { uid, email, phone, fullName, authProvider, emailVerified, phoneVerified, initialAddress } = req.body;
@@ -2193,7 +3090,7 @@ router.delete("/auth/addresses/:id", authenticateCustomer, async (req, res) => {
 });
 router.post("/orders", rateLimiter(15, 6e4), async (req, res) => {
   try {
-    const { customer, items, paymentMethod, notes, addressId } = req.body;
+    const { customer, items, paymentMethod, notes, addressId, whatsappConsent } = req.body;
     if (!customer) {
       return res.status(400).json({ error: "Customer and delivery details are required" });
     }
@@ -2212,11 +3109,13 @@ router.post("/orders", rateLimiter(15, 6e4), async (req, res) => {
         error: "An identical order was just placed seconds ago. Please check your order history or wait a moment."
       });
     }
-    const phoneVal = validatePhone(customer.phone);
+    const phoneVal = validatePhone(customer.phone, customer.countryCode || "+91");
     const cleanCustomer = {
       ...customer,
       fullName: customer.fullName.trim(),
+      countryCode: phoneVal.countryCode,
       phone: phoneVal.normalized,
+      fullPhone: phoneVal.fullPhone,
       address: customer.address.trim(),
       villageTown: customer.villageTown.trim(),
       pincode: customer.pincode.trim()
@@ -2254,9 +3153,10 @@ router.post("/orders", rateLimiter(15, 6e4), async (req, res) => {
       discountAmount: 0,
       totalAmount: pricing.totalAmount,
       paymentMethod: isOnlinePayment ? "ONLINE_UPI" : "COD",
-      paymentStatus: isOnlinePayment ? "Paid" : "Pending",
-      orderStatus: "Order Confirmed",
-      whatsappStatus: whatsappService.isConfigured() ? "pending" : "not_configured",
+      paymentStatus: isOnlinePayment ? "PAYMENT_PENDING" : "Pending",
+      orderStatus: isOnlinePayment ? "Payment Pending" : "Order Confirmed",
+      whatsappConsent: whatsappConsent !== false,
+      whatsappStatus: isOnlinePayment ? "Pending" : whatsappService.isConfigured() ? "Pending" : "not_configured",
       excelSyncStatus: excelSyncService.isConfigured() ? "pending" : "not_configured",
       notes: notes?.trim() || ""
     });
@@ -2289,24 +3189,6 @@ router.post("/orders", rateLimiter(15, 6e4), async (req, res) => {
       console.warn("Non-fatal webhook queue error:", err);
     }
     try {
-      whatsappService.sendOrderConfirmation(order).then((waRes) => {
-        serverDb.updateOrderSyncStatuses(order.id, {
-          whatsappStatus: waRes.status,
-          whatsappSentAt: waRes.sentAt,
-          whatsappError: waRes.error
-        }).catch(() => {
-        });
-      }).catch((err) => {
-        serverDb.updateOrderSyncStatuses(order.id, {
-          whatsappStatus: "failed",
-          whatsappError: err.message
-        }).catch(() => {
-        });
-      });
-    } catch (err) {
-      console.warn("Non-fatal WhatsApp dispatch notice:", err);
-    }
-    try {
       excelSyncService.syncOrderToExcel(order).then((xlRes) => {
         serverDb.updateOrderSyncStatuses(order.id, {
           excelSyncStatus: xlRes.status,
@@ -2326,7 +3208,7 @@ router.post("/orders", rateLimiter(15, 6e4), async (req, res) => {
     }
     return res.status(201).json({
       success: true,
-      message: "Order placed successfully and saved to database",
+      message: isOnlinePayment ? "Order reserved! Please complete UPI payment and submit your Transaction ID / UTR." : "Order placed successfully and saved to database",
       order
     });
   } catch (err) {
@@ -2334,8 +3216,30 @@ router.post("/orders", rateLimiter(15, 6e4), async (req, res) => {
     return res.status(500).json({ error: "Failed to process order. Please try again." });
   }
 });
+router.post("/orders/:id/submit-payment", rateLimiter(20, 6e4), async (req, res) => {
+  try {
+    const { utr, submittedPayerName, paymentScreenshotUrl } = req.body || {};
+    const updatedOrder = await serverDb.submitOrderPaymentProof(req.params.id, {
+      utr,
+      submittedPayerName,
+      paymentScreenshotUrl
+    });
+    return res.json({
+      success: true,
+      message: "Your payment details have been submitted. We are verifying your transaction. You will receive a confirmation message once your payment is verified.",
+      order: updatedOrder
+    });
+  } catch (err) {
+    if (err instanceof HttpError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    console.error("Submit payment proof error:", err);
+    return res.status(500).json({ error: "Failed to save payment details. Please try again." });
+  }
+});
 router.get("/orders/:id", async (req, res) => {
   try {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     const order = await serverDb.getOrderById(req.params.id);
     if (!order) {
       return res.status(404).json({ error: "Order not found" });
@@ -2387,8 +3291,13 @@ router.patch("/admin/orders/:id/status", authenticateAdmin, async (req, res) => 
   try {
     const { status, note } = req.body;
     const validStatuses = [
+      "Pending",
+      "Payment Pending",
+      "Payment Confirmed",
+      "CONFIRMED",
       "Order Confirmed",
       "Processing",
+      "Packing",
       "Dispatched",
       "Out for Delivery",
       "Delivered",
@@ -2449,12 +3358,22 @@ router.get("/admin/stats", authenticateAdmin, async (_req, res) => {
   try {
     const orders = await serverDb.getAllOrders();
     const totalOrders = orders.length;
-    const confirmed = orders.filter((o) => o.orderStatus === "Order Confirmed").length;
+    const confirmed = orders.filter((o) => o.orderStatus === "Order Confirmed" || o.orderStatus === "CONFIRMED").length;
     const processing = orders.filter((o) => o.orderStatus === "Processing").length;
     const dispatched = orders.filter((o) => o.orderStatus === "Dispatched" || o.orderStatus === "Out for Delivery").length;
     const delivered = orders.filter((o) => o.orderStatus === "Delivered").length;
     const cancelled = orders.filter((o) => o.orderStatus === "Cancelled").length;
-    const totalRevenue = orders.filter((o) => o.orderStatus !== "Cancelled").reduce((sum, o) => sum + (o.totalAmount || 0), 0);
+    const verifiedOrders = orders.filter((o) => o.paymentStatus === "PAID" || o.paymentStatus === "Paid");
+    const totalRevenue = verifiedOrders.reduce(
+      (sum, o) => sum + Number(o.paymentDetails?.verifiedAmount ?? o.totalAmount ?? 0),
+      0
+    );
+    const pendingPayments = orders.filter(
+      (o) => o.paymentStatus === "PAYMENT_PENDING" || o.paymentMethod === "ONLINE_UPI" && o.paymentStatus === "Pending"
+    ).length;
+    const rejectedPayments = orders.filter(
+      (o) => o.paymentStatus === "REJECTED" || o.paymentStatus === "Failed"
+    ).length;
     return res.json({
       stats: {
         totalOrders,
@@ -2463,11 +3382,132 @@ router.get("/admin/stats", authenticateAdmin, async (_req, res) => {
         dispatched,
         delivered,
         cancelled,
-        totalRevenue
+        totalRevenue,
+        verifiedPayments: verifiedOrders.length,
+        pendingPayments,
+        rejectedPayments
       }
     });
   } catch (err) {
     return res.status(500).json({ error: "Failed to compute admin stats" });
+  }
+});
+router.get("/admin/settings", authenticateAdmin, async (_req, res) => {
+  try {
+    const settings = await serverDb.getStoreSettings();
+    return res.json({ settings });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load store settings" });
+  }
+});
+router.put("/admin/settings", authenticateAdmin, async (req, res) => {
+  try {
+    const updated = await serverDb.saveStoreSettings(req.body || {});
+    return res.json({
+      success: true,
+      message: "Store and UPI payment settings saved successfully.",
+      settings: updated
+    });
+  } catch (err) {
+    if (err instanceof HttpError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    return res.status(500).json({ error: "Failed to update store settings" });
+  }
+});
+router.get("/admin/payments", authenticateAdmin, async (_req, res) => {
+  try {
+    const [orders, outbox, auditLogs] = await Promise.all([
+      serverDb.getAllOrders(),
+      serverDb.getWhatsAppOutboxAll(),
+      serverDb.getPaymentAuditLogs(100)
+    ]);
+    const verifiedOrders = orders.filter((o) => o.paymentStatus === "PAID" || o.paymentStatus === "Paid");
+    const pendingOrders = orders.filter(
+      (o) => o.paymentStatus === "PAYMENT_PENDING" || o.paymentMethod === "ONLINE_UPI" && o.paymentStatus === "Pending"
+    );
+    const rejectedOrders = orders.filter(
+      (o) => o.paymentStatus === "REJECTED" || o.paymentStatus === "Failed"
+    );
+    const totalVerifiedAmount = verifiedOrders.reduce(
+      (sum, o) => sum + Number(o.paymentDetails?.verifiedAmount ?? o.totalAmount ?? 0),
+      0
+    );
+    const waSent = outbox.filter((w) => w.status === "Sent").length;
+    const waFailed = outbox.filter((w) => w.status === "Failed").length;
+    const waPending = outbox.filter((w) => w.status === "Pending").length;
+    return res.json({
+      orders,
+      outbox,
+      auditLogs,
+      summary: {
+        totalVerifiedPayments: verifiedOrders.length,
+        totalVerifiedAmount,
+        pendingPayments: pendingOrders.length,
+        rejectedPayments: rejectedOrders.length,
+        whatsappSent: waSent,
+        whatsappFailed: waFailed,
+        whatsappPending: waPending
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load payment verification data" });
+  }
+});
+router.post("/admin/payments/:orderId/approve", authenticateAdmin, async (req, res) => {
+  try {
+    const { verifiedAmount, verifiedPayerName, utrOverride, adminNote, adminIdentity } = req.body || {};
+    const approvedOrder = await serverDb.approveOrderPayment(req.params.orderId, {
+      verifiedAmount,
+      verifiedPayerName,
+      utrOverride,
+      adminNote,
+      adminIdentity: adminIdentity || "Kavinash (Admin)"
+    });
+    let whatsappResult = null;
+    try {
+      const dispatchRes = await serverDb.dispatchIdempotentPaymentWhatsApp(approvedOrder.id, false);
+      whatsappResult = dispatchRes.outbox;
+    } catch (waErr) {
+      console.warn("Non-fatal WhatsApp confirmation error:", waErr?.message);
+    }
+    webhookService.queueAndDispatch(buildStatusChangedPayload(approvedOrder, "Payment Pending", "Order Confirmed")).catch(() => {
+    });
+    const latestOrder = await serverDb.getOrderById(approvedOrder.id) || approvedOrder;
+    return res.json({
+      success: true,
+      message: whatsappResult?.status === "Sent" ? "Payment verified \u2713 Order confirmed & WhatsApp confirmation sent!" : "Payment verified \u2713 Order confirmed! WhatsApp notification recorded for delivery/retry.",
+      order: latestOrder,
+      whatsapp: whatsappResult
+    });
+  } catch (err) {
+    if (err instanceof HttpError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    console.error("Approve payment error:", err);
+    return res.status(500).json({ error: "Failed to verify and approve payment" });
+  }
+});
+router.post("/admin/payments/:orderId/reject", authenticateAdmin, async (req, res) => {
+  try {
+    const { reason, adminIdentity } = req.body || {};
+    const rejectedOrder = await serverDb.rejectOrderPayment(req.params.orderId, {
+      reason: reason || "Payment could not be verified in Google Pay / bank history",
+      adminIdentity: adminIdentity || "Kavinash (Admin)"
+    });
+    webhookService.queueAndDispatch(buildStatusChangedPayload(rejectedOrder, "Payment Pending", "Cancelled")).catch(() => {
+    });
+    return res.json({
+      success: true,
+      message: "Payment marked as REJECTED.",
+      order: rejectedOrder
+    });
+  } catch (err) {
+    if (err instanceof HttpError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    console.error("Reject payment error:", err);
+    return res.status(500).json({ error: "Failed to reject payment" });
   }
 });
 router.get("/products", async (_req, res) => {
@@ -2614,12 +3654,25 @@ router.delete("/admin/categories/:id", authenticateAdmin, async (req, res) => {
   }
 });
 router.get("/admin/whatsapp/status", authenticateAdmin, async (_req, res) => {
-  return res.json({
-    configured: whatsappService.isConfigured(),
-    phoneNumberIdConfigured: Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID),
-    accessTokenConfigured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
-    templateConfigured: Boolean(process.env.WHATSAPP_TEMPLATE_NAME)
-  });
+  try {
+    const diagnostics = whatsappService.getConfigDiagnostics();
+    const outbox = await serverDb.getWhatsAppOutboxAll();
+    return res.json({
+      ...diagnostics,
+      phoneNumberIdConfigured: diagnostics.hasPhoneNumberId,
+      accessTokenConfigured: diagnostics.hasAccessToken,
+      templateConfigured: diagnostics.hasTemplateName,
+      outboxStats: {
+        total: outbox.length,
+        sent: outbox.filter((w) => w.status === "Sent").length,
+        pending: outbox.filter((w) => w.status === "Pending").length,
+        failed: outbox.filter((w) => w.status === "Failed").length
+      },
+      outbox: outbox.slice(0, 25)
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load WhatsApp diagnostics" });
+  }
 });
 router.get("/admin/excel/status", authenticateAdmin, async (_req, res) => {
   const status = excelSyncService.getConfigurationStatus();
@@ -2659,19 +3712,44 @@ router.post("/admin/excel/sync", authenticateAdmin, async (_req, res) => {
 });
 router.post("/admin/whatsapp/retry/:orderId", authenticateAdmin, async (req, res) => {
   try {
-    const order = await serverDb.getOrderById(req.params.orderId);
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    const result = await whatsappService.sendOrderConfirmation(order);
-    await serverDb.updateOrderSyncStatuses(order.id, {
-      whatsappStatus: result.status,
-      whatsappSentAt: result.sentAt,
-      whatsappError: result.error
+    const { alreadySent, outbox, order } = await serverDb.dispatchIdempotentPaymentWhatsApp(req.params.orderId, true);
+    return res.json({
+      success: outbox.status === "Sent",
+      alreadySent,
+      result: outbox,
+      order
     });
-    return res.json({ success: result.success, result });
   } catch (err) {
+    if (err instanceof HttpError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
     return res.status(500).json({ error: "Failed to send WhatsApp message: " + err.message });
+  }
+});
+router.post("/admin/whatsapp/retry-pending", authenticateAdmin, async (_req, res) => {
+  try {
+    const outboxList = await serverDb.getWhatsAppOutboxAll();
+    const retryable = outboxList.filter((w) => w.status === "Pending" || w.status === "Failed");
+    let sent = 0;
+    let failed = 0;
+    for (const item of retryable) {
+      try {
+        const resDispatch = await serverDb.dispatchIdempotentPaymentWhatsApp(item.orderId, true);
+        if (resDispatch.outbox.status === "Sent") sent++;
+        else failed++;
+      } catch {
+        failed++;
+      }
+    }
+    return res.json({
+      success: true,
+      message: `Processed ${retryable.length} queued notification(s): ${sent} sent, ${failed} pending/failed.`,
+      processed: retryable.length,
+      sent,
+      failed
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to retry queued WhatsApp notifications" });
   }
 });
 app.use("/api", router);

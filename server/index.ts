@@ -1,6 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
-import { serverDb } from './_lib/db';
+import { serverDb, HttpError } from './_lib/db';
 import {
   hashPassword,
   verifyPassword,
@@ -111,6 +111,60 @@ router.get(['/', '/health'], async (_req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     });
   }
+});
+
+// Public Storefront Settings & UPI Configuration Status (Safe fields only; zero secrets)
+router.get('/settings/public', async (_req: Request, res: Response) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const settings = await serverDb.getStoreSettings();
+    return res.json({
+      settings: {
+        name: settings.name,
+        owner: settings.owner,
+        primaryPhone: settings.primaryPhone,
+        secondaryPhone: settings.secondaryPhone,
+        email: settings.email,
+        defaultDeliveryCharge: settings.defaultDeliveryCharge,
+        freeDeliveryThreshold: settings.freeDeliveryThreshold,
+        fssaiNumber: settings.fssaiNumber || '',
+        gstNumber: settings.gstNumber || '',
+        upiId: settings.upiId || '',
+        merchantName: settings.merchantName || 'KVN Tea Powder',
+        upiConfigured: Boolean(settings.upiConfigured),
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to load public storefront configuration' });
+  }
+});
+
+// Rate-limited Cloudinary Signed Upload for Customer Payment Screenshots
+router.get('/payments/cloudinary-sign', rateLimiter(20, 60000), (_req: Request, res: Response) => {
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  const folder = 'kvn_payment_proofs';
+
+  if (!cloudName || !apiKey || !apiSecret) {
+    return res.json({
+      configured: false,
+      message: 'Cloudinary image hosting is not configured on the server.',
+    });
+  }
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const toSign = `folder=${folder}&timestamp=${timestamp}${apiSecret}`;
+  const signature = crypto.createHash('sha1').update(toSign).digest('hex');
+
+  return res.json({
+    configured: true,
+    cloudName,
+    apiKey,
+    folder,
+    timestamp,
+    signature,
+  });
 });
 
 // ==========================================
@@ -372,7 +426,7 @@ router.delete('/auth/addresses/:id', authenticateCustomer, async (req: Request, 
 // Place Order
 router.post('/orders', rateLimiter(15, 60000), async (req: Request, res: Response) => {
   try {
-    const { customer, items, paymentMethod, notes, addressId } = req.body;
+    const { customer, items, paymentMethod, notes, addressId, whatsappConsent } = req.body;
 
     if (!customer) {
       return res.status(400).json({ error: 'Customer and delivery details are required' });
@@ -396,11 +450,13 @@ router.post('/orders', rateLimiter(15, 60000), async (req: Request, res: Respons
       });
     }
 
-    const phoneVal = validatePhone(customer.phone);
+    const phoneVal = validatePhone(customer.phone, customer.countryCode || '+91');
     const cleanCustomer = {
       ...customer,
       fullName: customer.fullName.trim(),
+      countryCode: phoneVal.countryCode,
       phone: phoneVal.normalized,
+      fullPhone: phoneVal.fullPhone,
       address: customer.address.trim(),
       villageTown: customer.villageTown.trim(),
       pincode: customer.pincode.trim(),
@@ -441,9 +497,10 @@ router.post('/orders', rateLimiter(15, 60000), async (req: Request, res: Respons
       discountAmount: 0,
       totalAmount: pricing.totalAmount,
       paymentMethod: isOnlinePayment ? 'ONLINE_UPI' : 'COD',
-      paymentStatus: isOnlinePayment ? 'Paid' : 'Pending',
-      orderStatus: 'Order Confirmed',
-      whatsappStatus: whatsappService.isConfigured() ? 'pending' : 'not_configured',
+      paymentStatus: isOnlinePayment ? 'PAYMENT_PENDING' : 'Pending',
+      orderStatus: isOnlinePayment ? 'Payment Pending' : 'Order Confirmed',
+      whatsappConsent: whatsappConsent !== false,
+      whatsappStatus: isOnlinePayment ? 'Pending' : whatsappService.isConfigured() ? 'Pending' : 'not_configured',
       excelSyncStatus: excelSyncService.isConfigured() ? 'pending' : 'not_configured',
       notes: notes?.trim() || '',
     });
@@ -472,7 +529,7 @@ router.post('/orders', rateLimiter(15, 60000), async (req: Request, res: Respons
       }
     }
 
-    // 1. Dispatch n8n backup webhook asynchronously
+    // 1. Dispatch n8n backup webhook asynchronously for order capture logging
     try {
       webhookService.queueAndDispatch(buildOrderCreatedPayload(order)).catch((err) => {
         console.warn('Webhook queue notice:', err);
@@ -481,25 +538,9 @@ router.post('/orders', rateLimiter(15, 60000), async (req: Request, res: Respons
       console.warn('Non-fatal webhook queue error:', err);
     }
 
-    // 2. Dispatch official WhatsApp Business Cloud API confirmation asynchronously
-    try {
-      whatsappService.sendOrderConfirmation(order).then((waRes) => {
-        serverDb.updateOrderSyncStatuses(order.id, {
-          whatsappStatus: waRes.status,
-          whatsappSentAt: waRes.sentAt,
-          whatsappError: waRes.error,
-        }).catch(() => {});
-      }).catch((err) => {
-        serverDb.updateOrderSyncStatuses(order.id, {
-          whatsappStatus: 'failed',
-          whatsappError: err.message,
-        }).catch(() => {});
-      });
-    } catch (err) {
-      console.warn('Non-fatal WhatsApp dispatch notice:', err);
-    }
+    // NOTE: Official WhatsApp confirmation is ONLY triggered after manual admin payment verification (for ONLINE_UPI).
 
-    // 3. Dispatch Microsoft Graph Excel sync asynchronously
+    // 2. Dispatch Microsoft Graph Excel sync asynchronously
     try {
       excelSyncService.syncOrderToExcel(order).then((xlRes) => {
         serverDb.updateOrderSyncStatuses(order.id, {
@@ -519,7 +560,9 @@ router.post('/orders', rateLimiter(15, 60000), async (req: Request, res: Respons
 
     return res.status(201).json({
       success: true,
-      message: 'Order placed successfully and saved to database',
+      message: isOnlinePayment
+        ? 'Order reserved! Please complete UPI payment and submit your Transaction ID / UTR.'
+        : 'Order placed successfully and saved to database',
       order,
     });
   } catch (err: any) {
@@ -528,9 +571,33 @@ router.post('/orders', rateLimiter(15, 60000), async (req: Request, res: Respons
   }
 });
 
-// Get Order Details by ID
+// Submit Customer UPI Payment Proof (UTR + Optional Payer Name + Optional Screenshot)
+router.post('/orders/:id/submit-payment', rateLimiter(20, 60000), async (req: Request, res: Response) => {
+  try {
+    const { utr, submittedPayerName, paymentScreenshotUrl } = req.body || {};
+    const updatedOrder = await serverDb.submitOrderPaymentProof(req.params.id, {
+      utr,
+      submittedPayerName,
+      paymentScreenshotUrl,
+    });
+    return res.json({
+      success: true,
+      message: 'Your payment details have been submitted. We are verifying your transaction. You will receive a confirmation message once your payment is verified.',
+      order: updatedOrder,
+    });
+  } catch (err: any) {
+    if (err instanceof HttpError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    console.error('Submit payment proof error:', err);
+    return res.status(500).json({ error: 'Failed to save payment details. Please try again.' });
+  }
+});
+
+// Get Order Details by Order ID or Order Number (Live tracking & status polling)
 router.get('/orders/:id', async (req: Request, res: Response) => {
   try {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const order = await serverDb.getOrderById(req.params.id);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
@@ -596,8 +663,13 @@ router.patch('/admin/orders/:id/status', authenticateAdmin, async (req: Request,
   try {
     const { status, note } = req.body;
     const validStatuses: OrderStatus[] = [
+      'Pending',
+      'Payment Pending',
+      'Payment Confirmed',
+      'CONFIRMED',
       'Order Confirmed',
       'Processing',
+      'Packing',
       'Dispatched',
       'Out for Delivery',
       'Delivered',
@@ -664,20 +736,28 @@ router.post('/admin/webhooks/retry', authenticateAdmin, async (_req: Request, re
   }
 });
 
-// Admin: Statistics & Overview
+// Admin: Statistics & Overview (Revenue strictly from verified payments)
 router.get('/admin/stats', authenticateAdmin, async (_req: Request, res: Response) => {
   try {
     const orders = await serverDb.getAllOrders();
     const totalOrders = orders.length;
-    const confirmed = orders.filter((o) => o.orderStatus === 'Order Confirmed').length;
+    const confirmed = orders.filter((o) => o.orderStatus === 'Order Confirmed' || o.orderStatus === 'CONFIRMED').length;
     const processing = orders.filter((o) => o.orderStatus === 'Processing').length;
     const dispatched = orders.filter((o) => o.orderStatus === 'Dispatched' || o.orderStatus === 'Out for Delivery').length;
     const delivered = orders.filter((o) => o.orderStatus === 'Delivered').length;
     const cancelled = orders.filter((o) => o.orderStatus === 'Cancelled').length;
 
-    const totalRevenue = orders
-      .filter((o) => o.orderStatus !== 'Cancelled')
-      .reduce((sum, o) => sum + (o.totalAmount || 0), 0);
+    const verifiedOrders = orders.filter((o) => o.paymentStatus === 'PAID' || o.paymentStatus === 'Paid');
+    const totalRevenue = verifiedOrders.reduce(
+      (sum, o) => sum + Number(o.paymentDetails?.verifiedAmount ?? o.totalAmount ?? 0),
+      0
+    );
+    const pendingPayments = orders.filter(
+      (o) => o.paymentStatus === 'PAYMENT_PENDING' || (o.paymentMethod === 'ONLINE_UPI' && o.paymentStatus === 'Pending')
+    ).length;
+    const rejectedPayments = orders.filter(
+      (o) => o.paymentStatus === 'REJECTED' || o.paymentStatus === 'Failed'
+    ).length;
 
     return res.json({
       stats: {
@@ -688,10 +768,156 @@ router.get('/admin/stats', authenticateAdmin, async (_req: Request, res: Respons
         delivered,
         cancelled,
         totalRevenue,
+        verifiedPayments: verifiedOrders.length,
+        pendingPayments,
+        rejectedPayments,
       },
     });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to compute admin stats' });
+  }
+});
+
+// Admin: Store & UPI Configuration Settings
+router.get('/admin/settings', authenticateAdmin, async (_req: Request, res: Response) => {
+  try {
+    const settings = await serverDb.getStoreSettings();
+    return res.json({ settings });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to load store settings' });
+  }
+});
+
+router.put('/admin/settings', authenticateAdmin, async (req: Request, res: Response) => {
+  try {
+    const updated = await serverDb.saveStoreSettings(req.body || {});
+    return res.json({
+      success: true,
+      message: 'Store and UPI payment settings saved successfully.',
+      settings: updated,
+    });
+  } catch (err: any) {
+    if (err instanceof HttpError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    return res.status(500).json({ error: 'Failed to update store settings' });
+  }
+});
+
+// Admin: Payments Verification Console (Summary + Orders + Audit Log + Outbox)
+router.get('/admin/payments', authenticateAdmin, async (_req: Request, res: Response) => {
+  try {
+    const [orders, outbox, auditLogs] = await Promise.all([
+      serverDb.getAllOrders(),
+      serverDb.getWhatsAppOutboxAll(),
+      serverDb.getPaymentAuditLogs(100),
+    ]);
+
+    const verifiedOrders = orders.filter((o) => o.paymentStatus === 'PAID' || o.paymentStatus === 'Paid');
+    const pendingOrders = orders.filter(
+      (o) => o.paymentStatus === 'PAYMENT_PENDING' || (o.paymentMethod === 'ONLINE_UPI' && o.paymentStatus === 'Pending')
+    );
+    const rejectedOrders = orders.filter(
+      (o) => o.paymentStatus === 'REJECTED' || o.paymentStatus === 'Failed'
+    );
+
+    const totalVerifiedAmount = verifiedOrders.reduce(
+      (sum, o) => sum + Number(o.paymentDetails?.verifiedAmount ?? o.totalAmount ?? 0),
+      0
+    );
+
+    const waSent = outbox.filter((w) => w.status === 'Sent').length;
+    const waFailed = outbox.filter((w) => w.status === 'Failed').length;
+    const waPending = outbox.filter((w) => w.status === 'Pending').length;
+
+    return res.json({
+      orders,
+      outbox,
+      auditLogs,
+      summary: {
+        totalVerifiedPayments: verifiedOrders.length,
+        totalVerifiedAmount,
+        pendingPayments: pendingOrders.length,
+        rejectedPayments: rejectedOrders.length,
+        whatsappSent: waSent,
+        whatsappFailed: waFailed,
+        whatsappPending: waPending,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to load payment verification data' });
+  }
+});
+
+// Admin: Manually Approve & Verify Payment (Atomic Stock + Idempotent WhatsApp Confirmation)
+router.post('/admin/payments/:orderId/approve', authenticateAdmin, async (req: Request, res: Response) => {
+  try {
+    const { verifiedAmount, verifiedPayerName, utrOverride, adminNote, adminIdentity } = req.body || {};
+    const approvedOrder = await serverDb.approveOrderPayment(req.params.orderId, {
+      verifiedAmount,
+      verifiedPayerName,
+      utrOverride,
+      adminNote,
+      adminIdentity: adminIdentity || 'Kavinash (Admin)',
+    });
+
+    // Dispatch official WhatsApp confirmation via idempotent outbox (awaited before returning on Vercel)
+    let whatsappResult: any = null;
+    try {
+      const dispatchRes = await serverDb.dispatchIdempotentPaymentWhatsApp(approvedOrder.id, false);
+      whatsappResult = dispatchRes.outbox;
+    } catch (waErr: any) {
+      console.warn('Non-fatal WhatsApp confirmation error:', waErr?.message);
+    }
+
+    // Async backup notifications
+    webhookService
+      .queueAndDispatch(buildStatusChangedPayload(approvedOrder, 'Payment Pending', 'Order Confirmed'))
+      .catch(() => {});
+
+    const latestOrder = (await serverDb.getOrderById(approvedOrder.id)) || approvedOrder;
+    return res.json({
+      success: true,
+      message:
+        whatsappResult?.status === 'Sent'
+          ? 'Payment verified ✓ Order confirmed & WhatsApp confirmation sent!'
+          : 'Payment verified ✓ Order confirmed! WhatsApp notification recorded for delivery/retry.',
+      order: latestOrder,
+      whatsapp: whatsappResult,
+    });
+  } catch (err: any) {
+    if (err instanceof HttpError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    console.error('Approve payment error:', err);
+    return res.status(500).json({ error: 'Failed to verify and approve payment' });
+  }
+});
+
+// Admin: Reject Payment Verification
+router.post('/admin/payments/:orderId/reject', authenticateAdmin, async (req: Request, res: Response) => {
+  try {
+    const { reason, adminIdentity } = req.body || {};
+    const rejectedOrder = await serverDb.rejectOrderPayment(req.params.orderId, {
+      reason: reason || 'Payment could not be verified in Google Pay / bank history',
+      adminIdentity: adminIdentity || 'Kavinash (Admin)',
+    });
+
+    webhookService
+      .queueAndDispatch(buildStatusChangedPayload(rejectedOrder, 'Payment Pending', 'Cancelled'))
+      .catch(() => {});
+
+    return res.json({
+      success: true,
+      message: 'Payment marked as REJECTED.',
+      order: rejectedOrder,
+    });
+  } catch (err: any) {
+    if (err instanceof HttpError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    console.error('Reject payment error:', err);
+    return res.status(500).json({ error: 'Failed to reject payment' });
   }
 });
 
@@ -876,14 +1102,27 @@ router.delete('/admin/categories/:id', authenticateAdmin, async (req: Request, r
 // 6. WHATSAPP & MICROSOFT EXCEL SYNC ENDPOINTS
 // ==========================================
 
-// Admin: WhatsApp Cloud API Status
+// Admin: WhatsApp Cloud API Status & Outbox Diagnostics (No secrets returned)
 router.get('/admin/whatsapp/status', authenticateAdmin, async (_req: Request, res: Response) => {
-  return res.json({
-    configured: whatsappService.isConfigured(),
-    phoneNumberIdConfigured: Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID),
-    accessTokenConfigured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
-    templateConfigured: Boolean(process.env.WHATSAPP_TEMPLATE_NAME),
-  });
+  try {
+    const diagnostics = whatsappService.getConfigDiagnostics();
+    const outbox = await serverDb.getWhatsAppOutboxAll();
+    return res.json({
+      ...diagnostics,
+      phoneNumberIdConfigured: diagnostics.hasPhoneNumberId,
+      accessTokenConfigured: diagnostics.hasAccessToken,
+      templateConfigured: diagnostics.hasTemplateName,
+      outboxStats: {
+        total: outbox.length,
+        sent: outbox.filter((w) => w.status === 'Sent').length,
+        pending: outbox.filter((w) => w.status === 'Pending').length,
+        failed: outbox.filter((w) => w.status === 'Failed').length,
+      },
+      outbox: outbox.slice(0, 25),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to load WhatsApp diagnostics' });
+  }
 });
 
 // Admin: Microsoft Graph Excel Sync Status
@@ -929,22 +1168,49 @@ router.post('/admin/excel/sync', authenticateAdmin, async (_req: Request, res: R
   }
 });
 
-// Admin: Retry WhatsApp Confirmation for an Order
+// Admin: Retry WhatsApp Confirmation for an Order (Idempotent)
 router.post('/admin/whatsapp/retry/:orderId', authenticateAdmin, async (req: Request, res: Response) => {
   try {
-    const order = await serverDb.getOrderById(req.params.orderId);
-    if (!order) {
-      return res.status(404).json({ error: 'Order not found' });
-    }
-    const result = await whatsappService.sendOrderConfirmation(order);
-    await serverDb.updateOrderSyncStatuses(order.id, {
-      whatsappStatus: result.status,
-      whatsappSentAt: result.sentAt,
-      whatsappError: result.error,
+    const { alreadySent, outbox, order } = await serverDb.dispatchIdempotentPaymentWhatsApp(req.params.orderId, true);
+    return res.json({
+      success: outbox.status === 'Sent',
+      alreadySent,
+      result: outbox,
+      order,
     });
-    return res.json({ success: result.success, result });
   } catch (err: any) {
+    if (err instanceof HttpError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
     return res.status(500).json({ error: 'Failed to send WhatsApp message: ' + err.message });
+  }
+});
+
+// Admin: Retry All Pending / Failed WhatsApp Outbox Notifications
+router.post('/admin/whatsapp/retry-pending', authenticateAdmin, async (_req: Request, res: Response) => {
+  try {
+    const outboxList = await serverDb.getWhatsAppOutboxAll();
+    const retryable = outboxList.filter((w) => w.status === 'Pending' || w.status === 'Failed');
+    let sent = 0;
+    let failed = 0;
+    for (const item of retryable) {
+      try {
+        const resDispatch = await serverDb.dispatchIdempotentPaymentWhatsApp(item.orderId, true);
+        if (resDispatch.outbox.status === 'Sent') sent++;
+        else failed++;
+      } catch {
+        failed++;
+      }
+    }
+    return res.json({
+      success: true,
+      message: `Processed ${retryable.length} queued notification(s): ${sent} sent, ${failed} pending/failed.`,
+      processed: retryable.length,
+      sent,
+      failed,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to retry queued WhatsApp notifications' });
   }
 });
 

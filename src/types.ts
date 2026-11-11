@@ -78,6 +78,7 @@ export type OrderStatus =
   | 'Pending'
   | 'Payment Pending'
   | 'Payment Confirmed'
+  | 'CONFIRMED'
   | 'Order Confirmed'
   | 'Processing'
   | 'Packing'
@@ -85,6 +86,62 @@ export type OrderStatus =
   | 'Out for Delivery'
   | 'Delivered'
   | 'Cancelled';
+
+export type PaymentStatus =
+  | 'PAYMENT_PENDING'
+  | 'PAID'
+  | 'REJECTED'
+  | 'Pending'
+  | 'Paid'
+  | 'Failed'
+  | 'Refunded';
+
+export interface UpiPaymentInfo {
+  configured: boolean;
+  upiId?: string;
+  merchantName: string;
+  transactionRef: string;
+  transactionNote: string;
+  amount: number;
+  currency: 'INR';
+  upiUri?: string;
+  warning?: string;
+}
+
+export interface PaymentDetails {
+  utr?: string;
+  utrNormalized?: string;
+  submittedPayerName?: string;
+  verifiedPayerName?: string;
+  paymentScreenshotUrl?: string;
+  paymentSubmittedAt?: string;
+  verifiedAmount?: number;
+  verifiedAt?: string;
+  verifiedBy?: string;
+  rejectedAt?: string;
+  rejectedBy?: string;
+  rejectionReason?: string;
+}
+
+export interface PaymentAuditEntry {
+  id: string;
+  orderId: string;
+  orderNumber: string;
+  action:
+    | 'ORDER_CREATED'
+    | 'UTR_SUBMITTED'
+    | 'PAYMENT_APPROVED'
+    | 'PAYMENT_REJECTED'
+    | 'WHATSAPP_SENT'
+    | 'WHATSAPP_FAILED';
+  actor: string;
+  previousPaymentStatus?: string;
+  newPaymentStatus?: string;
+  utr?: string;
+  amount?: number;
+  note?: string;
+  timestamp: string;
+}
 
 export interface OrderStatusHistory {
   status: OrderStatus;
@@ -128,7 +185,9 @@ export interface CustomerUser {
 
 export interface OrderCustomer {
   fullName: string;
+  countryCode?: string;
   phone: string;
+  fullPhone?: string;
   email: string;
   address: string;
   villageTown: string;
@@ -155,12 +214,19 @@ export interface Order {
   couponCode?: string;
   totalAmount: number;
   paymentMethod: 'COD' | 'ONLINE_UPI';
-  paymentStatus: 'Pending' | 'Paid' | 'Failed' | 'Refunded';
+  paymentStatus: PaymentStatus;
   orderStatus: OrderStatus;
   statusHistory: OrderStatusHistory[];
-  whatsappStatus?: 'pending' | 'sent' | 'failed' | 'not_configured';
+  stockDeducted?: boolean;
+  stockDeductedAt?: string;
+  whatsappConsent?: boolean;
+  whatsappStatus?: 'Pending' | 'Sent' | 'Failed' | 'pending' | 'sent' | 'failed' | 'not_configured' | 'opted_out';
+  whatsappMessageId?: string;
   whatsappSentAt?: string;
   whatsappError?: string;
+  upiPaymentInfo?: UpiPaymentInfo;
+  paymentDetails?: PaymentDetails;
+  paymentAuditLog?: PaymentAuditEntry[];
   excelSyncStatus?: 'pending' | 'synced' | 'failed' | 'not_configured';
   excelSyncAt?: string;
   excelError?: string;
@@ -215,6 +281,9 @@ export interface BusinessConfig {
   freeDeliveryThreshold: number;
   fssaiNumber?: string;
   gstNumber?: string;
+  upiId?: string;
+  merchantName?: string;
+  upiConfigured?: boolean;
   googleOAuthConnected?: boolean;
   sheetsSpreadsheetId?: string;
   driveFolderId?: string;

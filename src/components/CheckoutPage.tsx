@@ -114,7 +114,9 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
     pincode: '',
   });
 
-  const [paymentMethod, setPaymentMethod] = useState<'COD' | 'ONLINE_UPI'>('COD');
+  const [paymentMethod, setPaymentMethod] = useState<'COD' | 'ONLINE_UPI'>('ONLINE_UPI');
+  const [countryCode, setCountryCode] = useState<string>('+91');
+  const [whatsappConsent, setWhatsappConsent] = useState<boolean>(true);
   const [selectedAreaId, setSelectedAreaId] = useState<string>('');
   const [submittingOrder, setSubmittingOrder] = useState(false);
   const [locating, setLocating] = useState(false);
@@ -511,14 +513,18 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
 
     setSubmittingOrder(true);
     try {
+      const cleanPhone = customer.phone.replace(/\D/g, '').slice(-10);
       const createdOrder = await api.createOrder(
         {
           customer: {
             ...customer,
-            phone: customer.phone.replace(/\D/g, '').slice(-10),
+            countryCode,
+            phone: cleanPhone,
+            fullPhone: `${countryCode}${cleanPhone}`,
           },
           items: cart,
           paymentMethod: paymentMethod === 'COD' ? 'COD' : 'ONLINE_UPI',
+          whatsappConsent,
           notes: customer.deliveryInstructions,
           addressId: selectedAddrId,
         } as any,
@@ -527,7 +533,11 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
 
       clearCart();
       window.dispatchEvent(new Event('kvn_products_updated'));
-      showToast('Order placed successfully! Saved to shared database.');
+      showToast(
+        paymentMethod === 'ONLINE_UPI'
+          ? `Order ${createdOrder.orderNumber} reserved! Complete UPI payment to proceed.`
+          : 'Order placed successfully! Saved to shared database.'
+      );
       onOrderSuccess(createdOrder);
     } catch (err: any) {
       console.error('Order submission error:', err);
@@ -1265,17 +1275,66 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
                 )}
               </div>
 
-              {/* SECTION 2: CONFIRMED DELIVERY DESTINATION PREVIEW */}
-              <div className="p-4 bg-emerald-50/70 border border-emerald-200/80 rounded-2xl">
-                <div className="flex items-center gap-2 font-bold text-xs text-[#143728] mb-1">
+              {/* SECTION 2: CONFIRMED DELIVERY DESTINATION & WHATSAPP MOBILE */}
+              <div className="p-4 bg-emerald-50/70 border border-emerald-200/80 rounded-2xl space-y-3">
+                <div className="flex items-center gap-2 font-bold text-xs text-[#143728]">
                   <BookmarkCheck className="w-4 h-4 text-emerald-700" />
                   <span>Confirmed Delivery Destination:</span>
                 </div>
                 <div className="text-xs text-stone-800 font-semibold">
-                  {customer.fullName} • +91 {customer.phone}
+                  {customer.fullName} • {countryCode} {customer.phone}
                 </div>
-                <div className="text-xs text-stone-600 mt-0.5">
+                <div className="text-xs text-stone-600">
                   {customer.address}, {customer.villageTown}, {customer.district || 'Tamil Nadu'} - {customer.pincode}
+                </div>
+
+                {/* Mobile Number with Country Code + WhatsApp Consent */}
+                <div className="pt-2 border-t border-emerald-200/60 space-y-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-bold text-stone-600 uppercase mb-1">
+                        Country Code
+                      </label>
+                      <select
+                        value={countryCode}
+                        onChange={(e) => setCountryCode(e.target.value)}
+                        className="w-full px-2.5 py-2 bg-white border border-emerald-200 rounded-xl text-xs font-semibold text-stone-800"
+                      >
+                        <option value="+91">+91 (India)</option>
+                        <option value="+1">+1 (USA/Canada)</option>
+                        <option value="+44">+44 (UK)</option>
+                        <option value="+65">+65 (Singapore)</option>
+                        <option value="+971">+971 (UAE)</option>
+                        <option value="+60">+60 (Malaysia)</option>
+                      </select>
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="block text-[10px] font-bold text-stone-600 uppercase mb-1">
+                        WhatsApp / Contact Number *
+                      </label>
+                      <input
+                        type="tel"
+                        required
+                        value={customer.phone}
+                        onChange={(e) => setCustomer((prev) => ({ ...prev, phone: e.target.value }))}
+                        placeholder="10-digit mobile number"
+                        className="w-full px-3 py-2 bg-white border border-emerald-200 rounded-xl text-xs font-semibold text-stone-800"
+                      />
+                    </div>
+                  </div>
+
+                  <label className="flex items-start gap-2 cursor-pointer text-[11px] text-stone-700">
+                    <input
+                      type="checkbox"
+                      checked={whatsappConsent}
+                      onChange={(e) => setWhatsappConsent(e.target.checked)}
+                      className="mt-0.5 rounded accent-[#143728]"
+                    />
+                    <span>
+                      Receive order & payment verification confirmation on <strong>WhatsApp</strong> at{' '}
+                      <span className="font-semibold text-[#143728]">{countryCode} {customer.phone || 'your number'}</span>.
+                    </span>
+                  </label>
                 </div>
               </div>
 
@@ -1300,8 +1359,34 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
                     Payment Method:
                   </label>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {/* Online UPI */}
+                    <label
+                      className={`flex items-start gap-3 p-4 rounded-2xl border cursor-pointer transition-all ${
+                        paymentMethod === 'ONLINE_UPI'
+                          ? 'border-[#2e5e43] bg-emerald-50/40 ring-1 ring-[#2e5e43]'
+                          : 'border-stone-200 bg-stone-50 hover:border-stone-300'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="paymentMethod"
+                        checked={paymentMethod === 'ONLINE_UPI'}
+                        onChange={() => setPaymentMethod('ONLINE_UPI')}
+                        className="mt-0.5 text-[#2e5e43] focus:ring-[#2e5e43]"
+                      />
+                      <div>
+                        <div className="font-semibold text-xs text-stone-900 flex items-center gap-1.5">
+                          <QrCode className="w-3.5 h-3.5 text-[#c29958]" />
+                          Pay Direct via UPI / GPay / PhonePe / Paytm
+                        </div>
+                        <p className="text-[11px] text-stone-500 mt-0.5">
+                          Dynamic QR & UPI link with locked ₹{finalTotal} total. Admin verifies UTR before confirmation.
+                        </p>
+                      </div>
+                    </label>
+
                     {/* COD */}
-                    <label 
+                    <label
                       className={`flex items-start gap-3 p-4 rounded-2xl border cursor-pointer transition-all ${
                         paymentMethod === 'COD'
                           ? 'border-[#2e5e43] bg-emerald-50/40 ring-1 ring-[#2e5e43]'
@@ -1325,33 +1410,16 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
                         </p>
                       </div>
                     </label>
-
-                    {/* Online UPI */}
-                    <label 
-                      className={`flex items-start gap-3 p-4 rounded-2xl border cursor-pointer transition-all ${
-                        paymentMethod === 'ONLINE_UPI'
-                          ? 'border-[#2e5e43] bg-emerald-50/40 ring-1 ring-[#2e5e43]'
-                          : 'border-stone-200 bg-stone-50 hover:border-stone-300'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="paymentMethod"
-                        checked={paymentMethod === 'ONLINE_UPI'}
-                        onChange={() => setPaymentMethod('ONLINE_UPI')}
-                        className="mt-0.5 text-[#2e5e43] focus:ring-[#2e5e43]"
-                      />
-                      <div>
-                        <div className="font-semibold text-xs text-stone-900 flex items-center gap-1.5">
-                          <QrCode className="w-3.5 h-3.5 text-[#c29958]" />
-                          Online UPI / Bank QR
-                        </div>
-                        <p className="text-[11px] text-stone-500 mt-0.5">
-                          Scan QR code with GPay/PhonePe. Verified securely before packing.
-                        </p>
-                      </div>
-                    </label>
                   </div>
+
+                  {paymentMethod === 'ONLINE_UPI' && !config.upiConfigured && (
+                    <div className="mt-3 p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      <span>
+                        <strong>Admin Configuration Notice:</strong> Merchant UPI ID is not configured yet in Admin Settings. You may still reserve the order or choose Cash on Delivery, and check with Kavinash on WhatsApp ({config.primaryPhone}).
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {orderErrorMsg && (
@@ -1370,10 +1438,12 @@ export const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, onOrderSucce
                   >
                     {submittingOrder ? (
                       <>
-                        <Loader2 className="w-4 h-4 animate-spin" /> Saving Order to Shared Database...
+                        <Loader2 className="w-4 h-4 animate-spin" /> Creating Order & Payment Reference...
                       </>
+                    ) : paymentMethod === 'ONLINE_UPI' ? (
+                      `Proceed to UPI QR Payment (₹${finalTotal})`
                     ) : (
-                      `Confirm & Place Order (₹${finalTotal})`
+                      `Confirm & Place COD Order (₹${finalTotal})`
                     )}
                   </button>
                 </div>

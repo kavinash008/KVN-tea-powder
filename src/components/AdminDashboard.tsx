@@ -11,6 +11,7 @@ import {
   Banner,
   DeliveryArea,
   BusinessConfig,
+  PaymentAuditEntry,
 } from '../types';
 import {
   requestGoogleToken,
@@ -129,6 +130,49 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
 
   const [syncingExcel, setSyncingExcel] = useState(false);
   const [retryingWaOrderId, setRetryingWaOrderId] = useState<string | null>(null);
+  const [retryingAllWa, setRetryingAllWa] = useState(false);
+
+  // Payments Verification & WhatsApp Outbox state
+  const [paymentFilter, setPaymentFilter] = useState<'all' | 'pending' | 'paid' | 'rejected'>('all');
+  const [paymentSummary, setPaymentSummary] = useState<any>(null);
+  const [paymentAuditLogs, setPaymentAuditLogs] = useState<PaymentAuditEntry[]>([]);
+  const [whatsappDiag, setWhatsappDiag] = useState<any>(null);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [screenshotModalUrl, setScreenshotModalUrl] = useState<string | null>(null);
+
+  // Approve / Reject Payment Modals
+  const [approveModalOrder, setApproveModalOrder] = useState<Order | null>(null);
+  const [approvePayerName, setApprovePayerName] = useState('');
+  const [approveUtrInput, setApproveUtrInput] = useState('');
+  const [approveNoteInput, setApproveNoteInput] = useState('');
+  const [processingPaymentAction, setProcessingPaymentAction] = useState(false);
+
+  const [rejectModalOrder, setRejectModalOrder] = useState<Order | null>(null);
+  const [rejectReasonInput, setRejectReasonInput] = useState('');
+
+  const loadPaymentData = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+      const [payRes, waRes, settingsRes] = await Promise.all([
+        api.adminGetPayments(token).catch(() => null),
+        api.adminGetWhatsAppStatus(token).catch(() => null),
+        api.adminGetSettings(token).catch(() => null),
+      ]);
+      if (payRes) {
+        setPaymentSummary(payRes.summary);
+        setPaymentAuditLogs(payRes.auditLogs || []);
+      }
+      if (waRes) {
+        setWhatsappDiag(waRes);
+      }
+      if (settingsRes) {
+        setConfig(settingsRes);
+        db.saveBusinessConfig(settingsRes);
+      }
+    } catch {
+      // ignore transient error
+    }
+  }, []);
 
   const handleSyncExcel = async () => {
     try {
@@ -152,13 +196,92 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
       if (res.success) {
         showAdminToast('WhatsApp confirmation message dispatched!');
       } else {
-        showAdminToast(res.result?.error || 'WhatsApp message failed');
+        showAdminToast(res.result?.reason || res.result?.error || 'WhatsApp message queued/pending');
       }
-      await loadServerOrders();
+      await Promise.all([loadServerOrders(), loadPaymentData()]);
     } catch (err: any) {
       showAdminToast(err.message || 'WhatsApp retry failed');
     } finally {
       setRetryingWaOrderId(null);
+    }
+  };
+
+  const handleRetryAllWhatsApp = async () => {
+    try {
+      setRetryingAllWa(true);
+      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+      const res = await api.adminRetryAllWhatsApp(token);
+      showAdminToast(res?.message || 'WhatsApp outbox retry executed');
+      await Promise.all([loadServerOrders(), loadPaymentData()]);
+    } catch (err: any) {
+      showAdminToast(err?.message || 'Failed to retry queued WhatsApp notifications');
+    } finally {
+      setRetryingAllWa(false);
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    try {
+      setSavingSettings(true);
+      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+      const updated = await api.adminUpdateSettings(token, config);
+      setConfig(updated);
+      db.saveBusinessConfig(updated);
+      window.dispatchEvent(new Event('kvn_settings_updated'));
+      showAdminToast(
+        updated.upiConfigured
+          ? `Settings & UPI ID (${updated.upiId}) saved to MongoDB!`
+          : 'Business settings saved to database!'
+      );
+    } catch (err: any) {
+      showAdminToast(err?.message || 'Failed to save settings');
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const handleConfirmApprovePayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!approveModalOrder) return;
+    try {
+      setProcessingPaymentAction(true);
+      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+      const res = await api.adminApprovePayment(token, approveModalOrder.id, {
+        verifiedAmount: approveModalOrder.totalAmount,
+        verifiedPayerName: approvePayerName.trim() || undefined,
+        utrOverride: approveUtrInput.trim() || undefined,
+        adminNote: approveNoteInput.trim() || undefined,
+      });
+      setApproveModalOrder(null);
+      showAdminToast(res.message || 'Payment verified ✓ Order confirmed!');
+      window.dispatchEvent(new Event('kvn_products_updated'));
+      await Promise.all([loadServerOrders(), loadServerProducts(), loadPaymentData()]);
+    } catch (err: any) {
+      showAdminToast(err?.message || 'Failed to approve payment');
+    } finally {
+      setProcessingPaymentAction(false);
+    }
+  };
+
+  const handleConfirmRejectPayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rejectModalOrder) return;
+    try {
+      setProcessingPaymentAction(true);
+      const token = localStorage.getItem('kvn_admin_token') || 'kavin008';
+      const res = await api.adminRejectPayment(
+        token,
+        rejectModalOrder.id,
+        rejectReasonInput.trim() || 'Transaction not found in GPay / bank record'
+      );
+      setRejectModalOrder(null);
+      setRejectReasonInput('');
+      showAdminToast(res.message || 'Payment marked as REJECTED');
+      await Promise.all([loadServerOrders(), loadPaymentData()]);
+    } catch (err: any) {
+      showAdminToast(err?.message || 'Failed to reject payment');
+    } finally {
+      setProcessingPaymentAction(false);
     }
   };
 
@@ -217,13 +340,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
     loadServerOrders();
     loadServerProducts();
     loadWebhookStatus();
+    loadPaymentData();
     const interval = setInterval(() => {
       loadServerOrders();
       loadServerProducts();
       loadWebhookStatus();
+      loadPaymentData();
     }, 12000);
     return () => clearInterval(interval);
-  }, [loadServerOrders, loadServerProducts, loadWebhookStatus]);
+  }, [loadServerOrders, loadServerProducts, loadWebhookStatus, loadPaymentData]);
 
   const handleUpdateOrderStatus = async (orderId: string, newStatus: any) => {
     try {
@@ -271,13 +396,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
     showAdminToast('Google Workspace disconnected');
   };
 
-  // Metrics computation (NO fake analytics data! Real calculations only)
+  // Metrics computation (NO fake analytics data! Revenue strictly from verified payments)
   const todayStr = new Date().toISOString().split('T')[0];
   const todayOrders = orders.filter((o) => o.createdAt.startsWith(todayStr));
-  const todaySales = todayOrders.reduce((sum, o) => sum + (o.paymentStatus === 'Paid' ? o.totalAmount : 0), 0);
+  const paidOrders = orders.filter((o) => o.paymentStatus === 'PAID' || o.paymentStatus === 'Paid');
+  const pendingUpiOrders = orders.filter(
+    (o) => o.paymentStatus === 'PAYMENT_PENDING' || (o.paymentMethod === 'ONLINE_UPI' && o.paymentStatus === 'Pending')
+  );
+  const rejectedPaymentOrders = orders.filter(
+    (o) => o.paymentStatus === 'REJECTED' || o.paymentStatus === 'Failed'
+  );
+  const todaySales = todayOrders.reduce(
+    (sum, o) => sum + (o.paymentStatus === 'PAID' || o.paymentStatus === 'Paid' ? Number(o.paymentDetails?.verifiedAmount ?? o.totalAmount) : 0),
+    0
+  );
   const pendingOrders = orders.filter((o) => o.orderStatus === 'Pending' || o.orderStatus === 'Payment Pending' || o.orderStatus === 'Order Confirmed');
-  const paidOrders = orders.filter((o) => o.paymentStatus === 'Paid');
-  const totalRevenue = paidOrders.reduce((sum, o) => sum + o.totalAmount, 0);
+  const totalRevenue = paidOrders.reduce(
+    (sum, o) => sum + Number(o.paymentDetails?.verifiedAmount ?? o.totalAmount ?? 0),
+    0
+  );
 
   // Low stock inventory calculation
   const lowStockItems: { product: Product; variant: any }[] = [];
@@ -295,7 +432,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
     { id: 'categories', label: 'Categories & Subcategories', shortLabel: 'Categories', icon: FolderTree },
     { id: 'orders', label: 'Orders Management', shortLabel: 'Orders', icon: ShoppingBag, badge: pendingOrders.length },
     { id: 'inventory', label: 'Inventory & Stock', shortLabel: 'Inventory', icon: Warehouse, badge: lowStockItems.length },
-    { id: 'payments', label: 'Payments & Settlement', shortLabel: 'Payments', icon: CreditCard },
+    { id: 'payments', label: 'Payments & Verification', shortLabel: 'Payments', icon: CreditCard, badge: pendingUpiOrders.length },
     { id: 'feedback', label: 'Customer Feedback', shortLabel: 'Feedback', icon: MessageSquare, badge: feedbackList.filter(f => f.status === 'Pending').length },
     { id: 'offers', label: 'Coupons & Offers', shortLabel: 'Offers', icon: Tag },
     { id: 'banners', label: 'Homepage Banners', shortLabel: 'Banners', icon: Image },
@@ -909,10 +1046,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                             <td className="p-3.5 font-bold text-stone-900 whitespace-nowrap">₹{ord.totalAmount}</td>
                             <td className="p-3.5 whitespace-nowrap">
                               <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                                ord.paymentStatus === 'Paid' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                                ord.paymentStatus === 'PAID' || ord.paymentStatus === 'Paid'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : ord.paymentStatus === 'REJECTED' || ord.paymentStatus === 'Failed'
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : 'bg-amber-100 text-amber-800'
                               }`}>
                                 {ord.paymentMethod} ({ord.paymentStatus})
                               </span>
+                              {ord.paymentDetails?.utrNormalized && (
+                                <div className="text-[10px] font-mono text-stone-500 mt-0.5">
+                                  UTR: {ord.paymentDetails.utrNormalized}
+                                </div>
+                              )}
                             </td>
                             <td className="p-3.5 whitespace-nowrap">
                               <span className="font-medium bg-stone-100 text-stone-800 px-2 py-0.5 rounded text-[10px] border border-stone-200 block w-max">
@@ -922,21 +1068,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                                 <div className="flex items-center gap-1">
                                   <span
                                     className={`px-1.5 py-0.5 rounded font-semibold ${
-                                      ord.whatsappStatus === 'sent'
+                                      (ord.whatsappStatus || '').toLowerCase() === 'sent'
                                         ? 'bg-emerald-100 text-emerald-800'
-                                        : ord.whatsappStatus === 'failed'
+                                        : (ord.whatsappStatus || '').toLowerCase() === 'failed'
                                         ? 'bg-rose-100 text-rose-800'
                                         : 'bg-stone-100 text-stone-600'
                                     }`}
                                   >
-                                    WA: {ord.whatsappStatus || 'pending'}
+                                    WA: {ord.whatsappStatus || 'Pending'}
                                   </span>
-                                  {ord.whatsappStatus === 'failed' && (
+                                  {((ord.whatsappStatus || '').toLowerCase() === 'failed' ||
+                                    ((ord.paymentStatus === 'PAID' || ord.paymentStatus === 'Paid') &&
+                                      (ord.whatsappStatus || '').toLowerCase() !== 'sent')) && (
                                     <button
                                       onClick={() => handleRetryWhatsApp(ord.id)}
                                       disabled={retryingWaOrderId === ord.id}
-                                      className="text-[9px] text-[#143728] hover:underline font-bold"
-                                      title="Retry sending WhatsApp message"
+                                      className="text-[9px] text-[#143728] hover:underline font-bold cursor-pointer"
+                                      title="Retry sending WhatsApp confirmation"
                                     >
                                       {retryingWaOrderId === ord.id ? '...' : 'Retry'}
                                     </button>
@@ -1053,92 +1201,315 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
             </div>
           )}
 
-          {/* PAYMENTS SECTION (Item 24) */}
+          {/* PAYMENTS VERIFICATION SECTION */}
           {activeSection === 'payments' && (
             <div className="space-y-6">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h2 className="text-xl font-bold text-stone-900">Payments & Transactions</h2>
+                  <h2 className="text-xl font-bold text-stone-900">UPI Payments Verification & Audit</h2>
                   <p className="text-xs text-stone-500">
-                    Track COD collections and UPI payments. (Orders remain Pending until verified)
+                    Manually verify customer UTR numbers against your Google Pay / Bank statement before approving.
                   </p>
                 </div>
+                <button
+                  onClick={() => Promise.all([loadServerOrders(), loadPaymentData()])}
+                  className="px-3.5 py-2 bg-white border border-stone-200 rounded-xl text-xs font-semibold text-stone-700 hover:bg-stone-50 inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingOrders ? 'animate-spin' : ''}`} /> Refresh
+                </button>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="bg-white p-5 rounded-2xl border border-stone-200 shadow-2xs">
-                  <span className="text-xs font-semibold text-stone-500">Verified Paid Orders</span>
-                  <div className="text-2xl font-bold text-emerald-700 mt-1">₹{totalRevenue}</div>
-                  <span className="text-[11px] text-stone-400">{paidOrders.length} confirmed</span>
+              {/* 6 Payment & WhatsApp Metrics Strictly Computed from DB */}
+              <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+                <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-2xs">
+                  <span className="text-[11px] font-semibold text-stone-500">Verified Payments</span>
+                  <div className="text-2xl font-bold text-emerald-700 mt-1">
+                    {paymentSummary?.totalVerifiedPayments ?? paidOrders.length}
+                  </div>
+                  <span className="text-[10px] text-stone-400">Confirmed PAID</span>
                 </div>
-                <div className="bg-white p-5 rounded-2xl border border-stone-200 shadow-2xs">
-                  <span className="text-xs font-semibold text-stone-500">Pending Online UPI</span>
+                <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-2xs">
+                  <span className="text-[11px] font-semibold text-stone-500">Verified Amount Received</span>
+                  <div className="text-2xl font-bold text-[#143728] mt-1">
+                    ₹{paymentSummary?.totalVerifiedAmount ?? totalRevenue}
+                  </div>
+                  <span className="text-[10px] text-stone-400">Paid orders only</span>
+                </div>
+                <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-2xs">
+                  <span className="text-[11px] font-semibold text-stone-500">Pending Verification</span>
                   <div className="text-2xl font-bold text-amber-600 mt-1">
-                    {orders.filter((o) => o.paymentMethod === 'ONLINE_UPI' && o.paymentStatus === 'Pending').length}
+                    {paymentSummary?.pendingPayments ?? pendingUpiOrders.length}
                   </div>
-                  <span className="text-[11px] text-stone-400">Awaiting bank verification</span>
+                  <span className="text-[10px] text-stone-400">Awaiting review</span>
                 </div>
-                <div className="bg-white p-5 rounded-2xl border border-stone-200 shadow-2xs">
-                  <span className="text-xs font-semibold text-stone-500">Cash on Delivery (COD)</span>
-                  <div className="text-2xl font-bold text-stone-800 mt-1">
-                    {orders.filter((o) => o.paymentMethod === 'COD').length}
+                <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-2xs">
+                  <span className="text-[11px] font-semibold text-stone-500">Rejected Payments</span>
+                  <div className="text-2xl font-bold text-rose-600 mt-1">
+                    {paymentSummary?.rejectedPayments ?? rejectedPaymentOrders.length}
                   </div>
-                  <span className="text-[11px] text-stone-400">Collect upon arrival</span>
+                  <span className="text-[10px] text-stone-400">Declined / unmatched</span>
+                </div>
+                <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-2xs">
+                  <span className="text-[11px] font-semibold text-stone-500">WhatsApp Sent</span>
+                  <div className="text-2xl font-bold text-emerald-700 mt-1">
+                    {paymentSummary?.whatsappSent ?? orders.filter((o) => (o.whatsappStatus || '').toLowerCase() === 'sent').length}
+                  </div>
+                  <span className="text-[10px] text-stone-400">API confirmed</span>
+                </div>
+                <div className="bg-white p-4 rounded-2xl border border-stone-200 shadow-2xs">
+                  <span className="text-[11px] font-semibold text-stone-500">WA Failed / Queued</span>
+                  <div className="text-2xl font-bold text-stone-800 mt-1">
+                    {(paymentSummary?.whatsappFailed ?? 0) + (paymentSummary?.whatsappPending ?? 0)}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRetryAllWhatsApp}
+                    disabled={retryingAllWa}
+                    className="text-[10px] font-bold text-[#143728] hover:underline cursor-pointer"
+                  >
+                    {retryingAllWa ? 'Retrying...' : 'Retry Queued →'}
+                  </button>
                 </div>
               </div>
 
-              {/* Payment entries */}
-              <div className="bg-white rounded-2xl border border-stone-200 p-6">
-                <h3 className="font-bold text-stone-900 text-sm mb-4">Payment Verification Console</h3>
+              {/* Filter Tabs */}
+              <div className="flex flex-wrap gap-2">
+                {(['all', 'pending', 'paid', 'rejected'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setPaymentFilter(tab)}
+                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                      paymentFilter === tab
+                        ? 'bg-[#143728] text-white border-[#143728]'
+                        : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'
+                    }`}
+                  >
+                    {tab === 'all'
+                      ? `All (${orders.length})`
+                      : tab === 'pending'
+                      ? `Pending (${pendingUpiOrders.length})`
+                      : tab === 'paid'
+                      ? `Verified Paid (${paidOrders.length})`
+                      : `Rejected (${rejectedPaymentOrders.length})`}
+                  </button>
+                ))}
+              </div>
+
+              {/* Payment Verification Table */}
+              <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-2xs">
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-xs">
-                    <thead>
-                      <tr className="border-b border-stone-200 text-stone-500 pb-2">
-                        <th className="py-2">Order</th>
-                        <th>Customer</th>
-                        <th>Method</th>
-                        <th>Amount</th>
-                        <th>Current Payment Status</th>
-                        <th>Action</th>
+                    <thead className="bg-stone-50 border-b border-stone-200 text-stone-600">
+                      <tr>
+                        <th className="p-3.5">Order ID & Time</th>
+                        <th className="p-3.5">Customer & Phone</th>
+                        <th className="p-3.5">Product & Qty</th>
+                        <th className="p-3.5">Amount</th>
+                        <th className="p-3.5">UTR & Payer Names</th>
+                        <th className="p-3.5">Screenshot</th>
+                        <th className="p-3.5">Payment & WA Status</th>
+                        <th className="p-3.5">Verification Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-stone-100">
-                      {orders.map((o) => (
-                        <tr key={o.id} className="hover:bg-stone-50">
-                          <td className="py-3 font-semibold">{o.orderNumber}</td>
-                          <td>{o.customer.fullName}</td>
-                          <td>{o.paymentMethod}</td>
-                          <td className="font-bold">₹{o.totalAmount}</td>
-                          <td>
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                              o.paymentStatus === 'Paid' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
-                            }`}>
-                              {o.paymentStatus}
-                            </span>
-                          </td>
-                          <td>
-                            {o.paymentStatus !== 'Paid' ? (
-                              <button
-                                onClick={() => {
-                                  db.updateOrderPayment(o.id, 'Paid');
-                                  refreshData();
-                                  showAdminToast(`Marked ${o.orderNumber} as Paid`);
-                                }}
-                                className="px-2.5 py-1 bg-emerald-700 text-white rounded text-[11px] font-semibold hover:bg-emerald-800"
-                              >
-                                Mark Paid (Confirmed)
-                              </button>
-                            ) : (
-                              <span className="text-emerald-700 font-semibold flex items-center gap-1 text-[11px]">
-                                <Check className="w-3.5 h-3.5" /> Verified
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
+                      {orders
+                        .filter((o) => {
+                          if (paymentFilter === 'pending') {
+                            return o.paymentStatus === 'PAYMENT_PENDING' || o.paymentStatus === 'Pending';
+                          }
+                          if (paymentFilter === 'paid') {
+                            return o.paymentStatus === 'PAID' || o.paymentStatus === 'Paid';
+                          }
+                          if (paymentFilter === 'rejected') {
+                            return o.paymentStatus === 'REJECTED' || o.paymentStatus === 'Failed';
+                          }
+                          return true;
+                        })
+                        .map((o) => {
+                          const isPaid = o.paymentStatus === 'PAID' || o.paymentStatus === 'Paid';
+                          const isRejected = o.paymentStatus === 'REJECTED' || o.paymentStatus === 'Failed';
+                          const isPending = !isPaid && !isRejected;
+                          const waLower = (o.whatsappStatus || '').toLowerCase();
+
+                          return (
+                            <tr key={o.id} className="hover:bg-stone-50/70 align-top">
+                              <td className="p-3.5 whitespace-nowrap">
+                                <div className="font-bold text-stone-900">{o.orderNumber}</div>
+                                <div className="text-[10px] text-stone-500 mt-0.5">
+                                  {new Date(o.createdAt).toLocaleString('en-IN', {
+                                    dateStyle: 'short',
+                                    timeStyle: 'short',
+                                  })}
+                                </div>
+                                <div className="text-[10px] text-stone-400 mt-0.5">{o.paymentMethod}</div>
+                              </td>
+
+                              <td className="p-3.5">
+                                <div className="font-semibold text-stone-900">{o.customer.fullName}</div>
+                                <div className="text-[11px] text-stone-600">
+                                  {o.customer.fullPhone || `${o.customer.countryCode || '+91'} ${o.customer.phone}`}
+                                </div>
+                              </td>
+
+                              <td className="p-3.5 max-w-[180px]">
+                                {o.items.map((it, idx) => (
+                                  <div key={idx} className="text-[11px] text-stone-700">
+                                    {it.productName} ({it.weight}) × <strong>{it.quantity}</strong>
+                                  </div>
+                                ))}
+                              </td>
+
+                              <td className="p-3.5 whitespace-nowrap">
+                                <div className="font-bold text-stone-900">₹{o.totalAmount}</div>
+                                {isPaid && o.paymentDetails?.verifiedAmount !== undefined && (
+                                  <div className="text-[10px] text-emerald-700 font-semibold">
+                                    Verified: ₹{o.paymentDetails.verifiedAmount}
+                                  </div>
+                                )}
+                              </td>
+
+                              <td className="p-3.5">
+                                <div className="font-mono text-[11px] font-bold text-stone-900">
+                                  {o.paymentDetails?.utrNormalized || (
+                                    <span className="font-sans font-normal text-stone-400 italic">No UTR submitted</span>
+                                  )}
+                                </div>
+                                {o.paymentDetails?.submittedPayerName && (
+                                  <div className="text-[10px] text-stone-600 mt-0.5">
+                                    Cust. Payer: <strong>{o.paymentDetails.submittedPayerName}</strong>
+                                  </div>
+                                )}
+                                {o.paymentDetails?.verifiedPayerName && (
+                                  <div className="text-[10px] text-emerald-700 mt-0.5">
+                                    Verified Payer: <strong>{o.paymentDetails.verifiedPayerName}</strong>
+                                  </div>
+                                )}
+                              </td>
+
+                              <td className="p-3.5">
+                                {o.paymentDetails?.paymentScreenshotUrl ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setScreenshotModalUrl(o.paymentDetails!.paymentScreenshotUrl!)}
+                                    className="px-2 py-1 bg-stone-100 border border-stone-300 rounded-lg text-[10px] font-semibold text-stone-800 hover:bg-stone-200 cursor-pointer"
+                                  >
+                                    View Proof
+                                  </button>
+                                ) : (
+                                  <span className="text-[10px] text-stone-400">None</span>
+                                )}
+                              </td>
+
+                              <td className="p-3.5 whitespace-nowrap space-y-1">
+                                <span
+                                  className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
+                                    isPaid
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : isRejected
+                                      ? 'bg-rose-100 text-rose-800'
+                                      : 'bg-amber-100 text-amber-800'
+                                  }`}
+                                >
+                                  {o.paymentStatus}
+                                </span>
+                                <div className="text-[10px] text-stone-500">Order: {o.orderStatus}</div>
+                                <div className="flex items-center gap-1.5">
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                      waLower === 'sent'
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : waLower === 'failed'
+                                        ? 'bg-rose-100 text-rose-800'
+                                        : 'bg-stone-100 text-stone-600'
+                                    }`}
+                                  >
+                                    WA: {o.whatsappStatus || 'Pending'}
+                                  </span>
+                                  {isPaid && waLower !== 'sent' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRetryWhatsApp(o.id)}
+                                      disabled={retryingWaOrderId === o.id}
+                                      className="text-[10px] font-bold text-[#143728] underline cursor-pointer"
+                                    >
+                                      {retryingWaOrderId === o.id ? '...' : 'Retry WA'}
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+
+                              <td className="p-3.5 whitespace-nowrap">
+                                {isPending ? (
+                                  <div className="flex flex-col gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setApproveModalOrder(o);
+                                        setApproveUtrInput(o.paymentDetails?.utr || '');
+                                        setApprovePayerName(o.paymentDetails?.submittedPayerName || '');
+                                        setApproveNoteInput('');
+                                      }}
+                                      className="px-3 py-1.5 bg-emerald-700 text-white rounded-lg text-[11px] font-bold hover:bg-emerald-800 cursor-pointer"
+                                    >
+                                      APPROVE PAYMENT
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setRejectModalOrder(o);
+                                        setRejectReasonInput('');
+                                      }}
+                                      className="px-3 py-1 bg-rose-50 text-rose-700 border border-rose-200 rounded-lg text-[10px] font-bold hover:bg-rose-100 cursor-pointer"
+                                    >
+                                      REJECT PAYMENT
+                                    </button>
+                                  </div>
+                                ) : isPaid ? (
+                                  <div className="text-[10px] text-emerald-800 font-semibold">
+                                    ✓ Verified by {o.paymentDetails?.verifiedBy || 'Admin'}
+                                  </div>
+                                ) : (
+                                  <div className="text-[10px] text-rose-700 max-w-[140px] whitespace-normal">
+                                    ✕ {o.paymentDetails?.rejectionReason || 'Rejected'}
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
                     </tbody>
                   </table>
                 </div>
+              </div>
+
+              {/* Payment Decisions Audit Log */}
+              <div className="bg-white rounded-2xl border border-stone-200 p-5 space-y-3">
+                <h3 className="font-bold text-stone-900 text-sm">Payment Verification Audit Log</h3>
+                {paymentAuditLogs.length === 0 ? (
+                  <p className="text-xs text-stone-400">No verification audit entries recorded yet.</p>
+                ) : (
+                  <div className="divide-y divide-stone-100 max-h-64 overflow-y-auto text-xs">
+                    {paymentAuditLogs.slice(0, 30).map((log) => (
+                      <div key={log.id} className="py-2 flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <span className="font-bold text-stone-900">{log.orderNumber}</span>{' '}
+                          <span className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-700 text-[10px] font-mono">
+                            {log.action}
+                          </span>
+                          {log.utr && (
+                            <span className="ml-2 text-[10px] font-mono text-stone-600">UTR: {log.utr}</span>
+                          )}
+                          <div className="text-[11px] text-stone-500 mt-0.5">
+                            {log.note} • Actor: <strong>{log.actor}</strong>
+                          </div>
+                        </div>
+                        <div className="text-[10px] text-stone-400 whitespace-nowrap">
+                          {new Date(log.timestamp).toLocaleString('en-IN')}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1582,6 +1953,114 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                   </div>
                 </div>
 
+                {/* Dynamic UPI Direct Payment Settings */}
+                <div className="p-4 bg-amber-50/70 border border-amber-200 rounded-xl space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h4 className="font-bold text-xs text-stone-900">UPI Direct Payment Configuration</h4>
+                      <p className="text-[11px] text-stone-600">
+                        Generates dynamic payment QR codes directly to your Google Pay / Bank UPI ID with zero payment gateway fees.
+                      </p>
+                    </div>
+                    <span
+                      className={`text-[10px] px-2.5 py-1 rounded-full font-bold ${
+                        config.upiId && config.upiId.includes('@')
+                          ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                          : 'bg-rose-100 text-rose-800 border border-rose-300'
+                      }`}
+                    >
+                      {config.upiId && config.upiId.includes('@')
+                        ? '✓ UPI QR Active'
+                        : '⚠ UPI ID Not Configured'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-semibold text-stone-700 mb-1">
+                        Merchant UPI ID (GPay / Bank VPA) *
+                      </label>
+                      <input
+                        type="text"
+                        value={config.upiId || ''}
+                        onChange={(e) => setConfig({ ...config, upiId: e.target.value })}
+                        placeholder="e.g. kavinash@okicici or 6383050287@ybl"
+                        className="w-full px-3 py-2 bg-white border border-amber-200 rounded-xl font-mono text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-stone-700 mb-1">Merchant Display Name</label>
+                      <input
+                        type="text"
+                        value={config.merchantName || 'KVN Tea Powder'}
+                        onChange={(e) => setConfig({ ...config, merchantName: e.target.value })}
+                        placeholder="KVN Tea Powder"
+                        className="w-full px-3 py-2 bg-white border border-amber-200 rounded-xl text-xs"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Official WhatsApp Business Cloud API Status & Outbox */}
+                <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h4 className="font-bold text-xs text-stone-900">
+                        WhatsApp Business Cloud API (Meta Graph)
+                      </h4>
+                      <p className="text-[11px] text-stone-500">
+                        Sends automated order confirmations strictly after admin verifies a payment. Configure env variables in Vercel.
+                      </p>
+                    </div>
+                    <span
+                      className={`text-[10px] px-2.5 py-1 rounded-full font-bold ${
+                        whatsappDiag?.configured
+                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                          : 'bg-amber-100 text-amber-800 border border-amber-300'
+                      }`}
+                    >
+                      {whatsappDiag?.configured ? '✓ Cloud API Active' : '⚠ Pending Env Setup'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
+                    <div className="bg-white p-2 rounded-lg border border-stone-200">
+                      <span className="text-stone-500 block">PHONE_NUMBER_ID</span>
+                      <strong className={whatsappDiag?.hasPhoneNumberId ? 'text-emerald-700' : 'text-amber-700'}>
+                        {whatsappDiag?.hasPhoneNumberId ? `Set (${whatsappDiag.phoneNumberIdMasked})` : 'Missing'}
+                      </strong>
+                    </div>
+                    <div className="bg-white p-2 rounded-lg border border-stone-200">
+                      <span className="text-stone-500 block">ACCESS_TOKEN</span>
+                      <strong className={whatsappDiag?.hasAccessToken ? 'text-emerald-700' : 'text-amber-700'}>
+                        {whatsappDiag?.hasAccessToken ? 'Configured ✓' : 'Missing'}
+                      </strong>
+                    </div>
+                    <div className="bg-white p-2 rounded-lg border border-stone-200">
+                      <span className="text-stone-500 block">WABA & TEMPLATE</span>
+                      <strong className="text-stone-800 truncate block">
+                        {whatsappDiag?.hasTemplateName ? whatsappDiag.templateName : 'Text Mode / Unset'}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px] pt-1">
+                    <span className="text-stone-600">
+                      Queue: <strong>{whatsappDiag?.outboxStats?.sent ?? 0} Sent</strong> •{' '}
+                      <strong>{whatsappDiag?.outboxStats?.pending ?? 0} Pending</strong> •{' '}
+                      <strong>{whatsappDiag?.outboxStats?.failed ?? 0} Failed</strong>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleRetryAllWhatsApp}
+                      disabled={retryingAllWa}
+                      className="px-3 py-1 bg-[#143728] text-white rounded-lg text-xs font-semibold hover:bg-[#204e37] cursor-pointer"
+                    >
+                      {retryingAllWa ? 'Retrying...' : 'Retry Queued'}
+                    </button>
+                  </div>
+                </div>
+
                 {/* Official Certification / Licences (Item 30) */}
                 <div className="pt-3 border-t border-stone-200 space-y-3">
                   <h4 className="font-bold text-stone-800">Document & Registration Information</h4>
@@ -1612,13 +2091,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
 
                 <div className="pt-4">
                   <button
-                    onClick={() => {
-                      db.saveBusinessConfig(config);
-                      showAdminToast('Business settings saved successfully!');
-                    }}
-                    className="w-full py-3 bg-[#143728] text-white font-bold rounded-xl hover:bg-[#204e37] transition-all"
+                    type="button"
+                    disabled={savingSettings}
+                    onClick={handleSaveSettings}
+                    className="w-full py-3 bg-[#143728] text-white font-bold rounded-xl hover:bg-[#204e37] transition-all disabled:opacity-50 cursor-pointer"
                   >
-                    Save Business Configuration
+                    {savingSettings ? 'Saving Settings to MongoDB...' : 'Save Business & UPI Configuration'}
                   </button>
                 </div>
               </div>
@@ -1867,6 +2345,162 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, onView
                 Done
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* APPROVE PAYMENT VERIFICATION MODAL */}
+      {approveModalOrder && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => !processingPaymentAction && setApproveModalOrder(null)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-stone-200 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-bold text-stone-900">Verify & Approve Payment</h3>
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-950">
+              Confirm you checked your actual <strong>Google Pay / Bank statement</strong> and received{' '}
+              <strong>₹{approveModalOrder.totalAmount}</strong> for Order{' '}
+              <strong>{approveModalOrder.orderNumber}</strong> before approving.
+            </div>
+            <form onSubmit={handleConfirmApprovePayment} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Verified Amount (Locked)</label>
+                <input
+                  type="text"
+                  readOnly
+                  value={`₹${approveModalOrder.totalAmount}`}
+                  className="w-full px-3 py-2 bg-stone-100 border border-stone-200 rounded-xl font-bold text-stone-900"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">
+                  UPI Transaction ID / UTR *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={approveUtrInput}
+                  onChange={(e) => setApproveUtrInput(e.target.value)}
+                  placeholder="Enter bank / GPay UTR reference"
+                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-xl font-mono uppercase"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">
+                  Actual Payer Name (from your Google Pay / Bank record)
+                </label>
+                <input
+                  type="text"
+                  value={approvePayerName}
+                  onChange={(e) => setApprovePayerName(e.target.value)}
+                  placeholder="e.g. Payer name shown in GPay credit alert"
+                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-xl"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Admin Verification Note (Optional)</label>
+                <input
+                  type="text"
+                  value={approveNoteInput}
+                  onChange={(e) => setApproveNoteInput(e.target.value)}
+                  placeholder="e.g. Verified in KVB GPay statement"
+                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-xl"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={processingPaymentAction}
+                  onClick={() => setApproveModalOrder(null)}
+                  className="px-4 py-2 border border-stone-300 rounded-xl text-stone-700 font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={processingPaymentAction}
+                  className="px-5 py-2 bg-emerald-700 text-white rounded-xl font-bold hover:bg-emerald-800 inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  {processingPaymentAction ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" /> Approving & Sending WhatsApp...
+                    </>
+                  ) : (
+                    'APPROVE PAYMENT ✓'
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* REJECT PAYMENT MODAL */}
+      {rejectModalOrder && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => !processingPaymentAction && setRejectModalOrder(null)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-stone-200 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-bold text-rose-900">Reject Payment ({rejectModalOrder.orderNumber})</h3>
+            <form onSubmit={handleConfirmRejectPayment} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold text-stone-700 mb-1">Rejection Reason *</label>
+                <textarea
+                  rows={3}
+                  required
+                  value={rejectReasonInput}
+                  onChange={(e) => setRejectReasonInput(e.target.value)}
+                  placeholder="e.g. Transaction ID not found in Google Pay history / Amount mismatch"
+                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-xl"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={processingPaymentAction}
+                  onClick={() => setRejectModalOrder(null)}
+                  className="px-4 py-2 border border-stone-300 rounded-xl text-stone-700 font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={processingPaymentAction}
+                  className="px-5 py-2 bg-rose-600 text-white rounded-xl font-bold hover:bg-rose-700 cursor-pointer"
+                >
+                  {processingPaymentAction ? 'Processing...' : 'CONFIRM REJECT'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* PAYMENT SCREENSHOT LIGHTBOX MODAL */}
+      {screenshotModalUrl && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+          onClick={() => setScreenshotModalUrl(null)}
+        >
+          <div className="bg-white rounded-2xl p-3 max-w-lg w-full space-y-2" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center text-xs font-bold text-stone-800 px-1">
+              <span>Customer Submitted Payment Screenshot</span>
+              <button
+                type="button"
+                onClick={() => setScreenshotModalUrl(null)}
+                className="text-stone-500 hover:text-stone-900 px-2 py-0.5 cursor-pointer"
+              >
+                ✕ Close
+              </button>
+            </div>
+            <img src={screenshotModalUrl} alt="Payment proof" className="w-full max-h-[75vh] object-contain rounded-xl" />
           </div>
         </div>
       )}
